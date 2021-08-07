@@ -1,0 +1,23 @@
+[package]
+edition = "2018"
+name = "pektin"
+version = "0.1.0"
+
+[dependencies]
+redis = "0.21"
+pretty-hex = "0.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+trust-dns-proto = "0.20"
+
+[lib]
+name = "pektin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "main"
+path = "src/main.rs"
+
+[[bin]]
+name = "redis"
+path = "src/redis.rs"

@@ -1,20 +1,29 @@
-use pektin::persistence::{REDIS_URL, get_list};
+use dotenv::dotenv;
+use pektin::load_env;
+use pektin::persistence::get_rrs;
 use redis::Client;
 use std::error::Error;
-use std::net::{Ipv4Addr, UdpSocket};
-use std::str::FromStr;
+use std::net::UdpSocket;
 use trust_dns_proto::op::{Edns, Message, MessageType, ResponseCode};
-use trust_dns_proto::rr::{RData, Record};
 
-const BIND_ADDR: &'static str = "0.0.0.0";
-const BIND_PORT: u16 = 5354;
+const D_BIND_ADDRESS: &'static str = "0.0.0.0";
+const D_BIND_PORT: &'static str = "53";
+const D_REDIS_URI: &'static str = "redis://redis:6379";
+
 const RECV_BUFSIZE: usize = 4096;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let client = Client::open(REDIS_URL)?;
+    dotenv().ok();
+
+    println!("Started Pektin with these globals:");
+    let redis_uri = load_env(D_REDIS_URI, "REDIS_URI");
+    let bind_address = load_env(D_BIND_ADDRESS, "BIND_ADDRESS"); 
+    let bind_port = load_env(D_BIND_PORT, "BIND_PORT");
+
+    let client = Client::open(redis_uri)?;
     let mut con = client.get_connection()?;
 
-    let socket = UdpSocket::bind(format!("{}:{}", BIND_ADDR, BIND_PORT))?;
+    let socket = UdpSocket::bind(format!("{}:{}", bind_address, bind_port))?;
     let mut buf = [0; RECV_BUFSIZE];
     let (_, addr) = socket.recv_from(&mut buf)?;
 
@@ -28,12 +37,10 @@ fn main() -> Result<(), Box<dyn Error>> {
     response.set_recursion_available(false);
 
     let q = &msg.queries()[0];
-    let key = format!("{}:{}", q.name().to_ascii(), q.query_type().to_string());
-    let res = get_list::<_, String>(&mut con, key);
-    if let Ok(entries) = res {
-        for e in entries {
-            let addr = Ipv4Addr::from_str(&e)?;
-            response.add_answer(Record::from_rdata(q.name().clone(), 300, RData::A(addr)));
+    let res = get_rrs(&mut con, q.name(), q.query_type());
+    if let Ok(records) = res {
+        for record in records {
+            response.add_answer(record);
         }
 
         let mut edns = Edns::new();

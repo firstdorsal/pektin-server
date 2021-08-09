@@ -1,16 +1,6 @@
+use std::env;
+
 pub mod resource_record;
-
-pub mod utils {
-    use std::env;
-
-    pub fn load_env(default_parameter: &str , parameter_name: &str) -> String{
-        let mut p=String::from(default_parameter);
-        if env::var(parameter_name).is_ok() && env::var(parameter_name).unwrap().len()>0 {p=env::var(parameter_name).unwrap()};
-        println!("{}: {}",parameter_name, p);
-        return p;
-    }
-
-}
 
 pub mod persistence {
     use redis::{Connection, FromRedisValue, RedisResult, ToRedisArgs};
@@ -45,3 +35,13 @@ pub mod persistence {
     }
 }
 
+pub fn load_env(default_parameter: &str, parameter_name: &str) -> String {
+    let mut p = String::from(default_parameter);
+    if let Ok(param) = env::var(parameter_name) {
+        if param.len() > 0 {
+            p = param;
+        }
+    };
+    println!("{}: {}", parameter_name, p);
+    return p;
+}

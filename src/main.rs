@@ -1,5 +1,5 @@
-use pektin::persistence::{ get_list };
-use pektin::utils::{ load_env };
+use pektin::persistence::get_list;
+use pektin::load_env;
 use redis::Client;
 use std::error::Error;
 use std::net::{Ipv4Addr, UdpSocket};
@@ -16,9 +16,9 @@ const RECV_BUFSIZE: usize = 4096;
 fn main() -> Result<(), Box<dyn Error>> {
     println!("Started Pektin with these globals:");
     
-    let redis_uri= load_env(D_REDIS_URI, "REDIS_URI");
-    let bind_address= load_env(D_BIND_ADDRESS, "BIND_ADDRESS"); 
-    let bind_port= load_env(D_BIND_PORT, "BIND_PORT");
+    let redis_uri = load_env(D_REDIS_URI, "REDIS_URI");
+    let bind_address = load_env(D_BIND_ADDRESS, "BIND_ADDRESS"); 
+    let bind_port = load_env(D_BIND_PORT, "BIND_PORT");
 
     let client = Client::open(redis_uri)?;
     let mut con = client.get_connection()?;

@@ -10,14 +10,3 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 trust-dns-proto = "0.20"
 
-[lib]
-name = "pektin"
-path = "src/lib.rs"
-
-[[bin]]
-name = "main"
-path = "src/main.rs"
-
-[[bin]]
-name = "redis"
-path = "src/redis.rs"

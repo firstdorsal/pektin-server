@@ -1,9 +1,19 @@
 pub mod resource_record;
 
+pub mod utils {
+    use std::env;
+
+    pub fn load_env(default_parameter: &str , parameter_name: &str) -> String{
+        let mut p=String::from(default_parameter);
+        if env::var(parameter_name).is_ok() && env::var(parameter_name).unwrap().len()>0 {p=env::var(parameter_name).unwrap()};
+        println!("{}: {}",parameter_name, p);
+        return p;
+    }
+
+}
+
 pub mod persistence {
     use redis::{Connection, FromRedisValue, RedisResult, ToRedisArgs};
-
-    pub const REDIS_URL: &'static str = "redis://127.0.0.1:6379";
 
     pub fn set_list<K, T, V>(con: &mut Connection, key: K, values: V) -> RedisResult<()>
     where
@@ -34,3 +44,4 @@ pub mod persistence {
         redis::cmd("DEL").arg(key.as_ref()).query(con)
     }
 }
+

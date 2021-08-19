@@ -10,6 +10,6 @@ services:
             BIND_PORT: $BIND_PORT
         ports:
             - "127.0.0.1:53:$BIND_PORT/udp"
-    redis:
-        image: redis:alpine
-        restart: always
+    #redis:
+    #    image: redis:alpine
+    #    restart: always

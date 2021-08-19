@@ -18,10 +18,10 @@ fn main() -> PektinResult<()> {
 
     let ttl = 300;
     let a = serde_json::to_string(&ResourceRecord::A(Ipv4Addr::from_str("2.56.96.115").unwrap())).unwrap();
-    let aaaa = serde_json::to_string(&ResourceRecord::A6(Ipv6Addr::from_str("2a03:4000:3e:dd::1").unwrap())).unwrap();
-    let ns1 = serde_json::to_string(&ResourceRecord::Ns("e-flat.vonforell.de.".into())).unwrap();
-    let ns2 = serde_json::to_string(&ResourceRecord::Ns("g-flat.vonforell.de.".into())).unwrap();
-    let ns3 = serde_json::to_string(&ResourceRecord::Ns("b-flat.vonforell.de.".into())).unwrap();
+    let aaaa = serde_json::to_string(&ResourceRecord::AAAA(Ipv6Addr::from_str("2a03:4000:3e:dd::1").unwrap())).unwrap();
+    let ns1 = serde_json::to_string(&ResourceRecord::NS("e-flat.vonforell.de.".into())).unwrap();
+    let ns2 = serde_json::to_string(&ResourceRecord::NS("g-flat.vonforell.de.".into())).unwrap();
+    let ns3 = serde_json::to_string(&ResourceRecord::NS("b-flat.vonforell.de.".into())).unwrap();
 
     set_list(&mut con, "vonforell.de.:A", &[format!("{} {}", ttl, a)], true)?;
     set_list(&mut con, "vonforell.de.:AAAA", &[format!("{} {}", ttl, aaaa)], true)?;

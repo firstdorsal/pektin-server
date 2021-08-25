@@ -10,6 +10,11 @@ services:
             BIND_PORT: $BIND_PORT
         ports:
             - "127.0.0.1:53:$BIND_PORT/udp"
-    redis:
-        image: redis:alpine
-        restart: always
+        networks:
+            - pektin
+    #redis:
+    #    image: redis:alpine
+    #    restart: always
+networks:
+    pektin:
+        name: pektin-ui_default

@@ -49,6 +49,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         edns.set_max_payload(4096);
         response.set_edns(edns);
     } else {
+        eprintln!("{}", res.err().unwrap());
         response.set_response_code(ResponseCode::ServFail);
     }
 

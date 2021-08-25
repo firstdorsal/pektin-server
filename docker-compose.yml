@@ -5,9 +5,9 @@ services:
             context: "."
         restart: always
         environment:
-            REDIS_URI: $REDIS_URI
-            BIND_ADDRESS: $BIND_ADDRESS
-            BIND_PORT: $BIND_PORT
+            REDIS_URI: redis://redis:6379
+            BIND_ADDRESS: 0.0.0.0
+            BIND_PORT: 53
         ports:
             - "127.0.0.1:53:$BIND_PORT/udp"
         networks:

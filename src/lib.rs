@@ -7,7 +7,7 @@ pub mod persistence;
 pub enum PektinError {
     #[error("redis error")]
     RedisError(#[from] redis::RedisError),
-    #[error("could not (de)serialize JSON")]
+    #[error("could not (de)serialize JSON: `{0}`")]
     JsonError(#[from] serde_json::Error),
     #[error("invalid DNS data")]
     ProtoError(#[from] trust_dns_proto::error::ProtoError),

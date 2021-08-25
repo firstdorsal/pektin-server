@@ -1,7 +1,6 @@
 use std::env;
 use thiserror::Error;
 
-pub mod resource_record;
 pub mod persistence;
 
 #[derive(Debug, Error)]

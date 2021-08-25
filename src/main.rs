@@ -1,7 +1,8 @@
 use dotenv::dotenv;
 use pektin::load_env;
-use pektin::persistence::get_rrs;
+use pektin::persistence::get_rrset;
 use redis::Client;
+use trust_dns_proto::rr::Record;
 use std::error::Error;
 use std::net::UdpSocket;
 use trust_dns_proto::op::{Edns, Message, MessageType, ResponseCode};
@@ -37,10 +38,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     response.set_recursion_available(false);
 
     let q = &msg.queries()[0];
-    let res = get_rrs(&mut con, q.name(), q.query_type());
-    if let Ok(records) = res {
-        for record in records {
-            response.add_answer(record);
+    let res = get_rrset(&mut con, q.name(), q.query_type());
+    if let Ok(rrset) = res {
+        for record in rrset.rr_set {
+            let rr = Record::from_rdata(q.name().clone(), record.ttl, record.value);
+            response.add_answer(rr);
         }
 
         let mut edns = Edns::new();

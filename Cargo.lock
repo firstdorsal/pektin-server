@@ -259,6 +259,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "trust-dns-proto",
+ "url",
 ]
 
 [[package]]
@@ -472,7 +473,9 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b7b349f11a7047e6d1276853e612d152f5e8a352c61917887cc2169e2366b4c"
 dependencies = [
  "autocfg",
+ "bytes",
  "libc",
+ "memchr",
  "mio",
  "num_cpus",
  "pin-project-lite",
@@ -481,9 +484,7 @@ dependencies = [
 
 [[package]]
 name = "trust-dns-proto"
-version = "0.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ad0d7f5db438199a6e2609debe3f69f808d074e0a2888ee0bccb45fe234d03f4"
+version = "0.21.0-alpha.1"
 dependencies = [
  "async-trait",
  "cfg-if",
@@ -497,6 +498,7 @@ dependencies = [
  "lazy_static",
  "log",
  "rand",
+ "serde",
  "smallvec",
  "thiserror",
  "tinyvec",
@@ -544,6 +546,7 @@ dependencies = [
  "idna",
  "matches",
  "percent-encoding",
+ "serde",
 ]
 
 [[package]]

@@ -2,6 +2,7 @@ use std::env;
 use thiserror::Error;
 
 pub mod persistence;
+pub use trust_dns_proto as proto;
 
 #[derive(Debug, Error)]
 pub enum PektinError {

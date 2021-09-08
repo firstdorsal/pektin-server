@@ -10,12 +10,16 @@ pub struct ResourceRecord {
 }
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct RrSet {
+pub struct RedisValue {
     pub rr_type: RecordType,
     pub rr_set: Vec<ResourceRecord>,
 }
 
-pub fn get_rrset(con: &mut Connection, zone: &Name, rr_type: RecordType) -> PektinResult<RrSet> {
+pub fn get_rrset(
+    con: &mut Connection,
+    zone: &Name,
+    rr_type: RecordType,
+) -> PektinResult<RedisValue> {
     let key = format!("{}:{}", zone, rr_type);
     let rrset_json: String = con.get(key)?;
     Ok(serde_json::from_str(&rrset_json)?)

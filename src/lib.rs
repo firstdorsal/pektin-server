@@ -14,6 +14,10 @@ pub enum PektinError {
     ProtoError(#[from] trust_dns_proto::error::ProtoError),
     #[error("data in redis invalid")]
     InvalidRedisData,
+    #[error("redis key does not exist")]
+    RedisKeyNonexistent,
+    #[error("requested redis key had an unexpected type")]
+    WickedRedisValue,
 }
 pub type PektinResult<T> = Result<T, PektinError>;
 

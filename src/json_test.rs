@@ -1,6 +1,5 @@
-use pektin::persistence::RedisValue;
-use pektin::persistence::ResourceRecord;
-use pektin::PektinResult;
+use pektin_common::{RedisValue, ResourceRecord};
+use pektin_server::PektinResult;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
 use trust_dns_proto::rr::dnssec::rdata::DNSSECRData;

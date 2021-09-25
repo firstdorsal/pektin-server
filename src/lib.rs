@@ -1,4 +1,3 @@
-use std::env;
 use thiserror::Error;
 
 pub mod persistence;
@@ -6,6 +5,8 @@ pub use trust_dns_proto as proto;
 
 #[derive(Debug, Error)]
 pub enum PektinError {
+    #[error("{0}")]
+    CommonError(#[from] pektin_common::PektinCommonError),
     #[error("redis error")]
     RedisError(#[from] redis::RedisError),
     #[error("cannot connect to redis")]
@@ -22,14 +23,3 @@ pub enum PektinError {
     WickedRedisValue,
 }
 pub type PektinResult<T> = Result<T, PektinError>;
-
-pub fn load_env(default_parameter: &str, parameter_name: &str) -> String {
-    let mut p = String::from(default_parameter);
-    if let Ok(param) = env::var(parameter_name) {
-        if param.len() > 0 {
-            p = param;
-        }
-    };
-    println!("{}: {}", parameter_name, p);
-    return p;
-}

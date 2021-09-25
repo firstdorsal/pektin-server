@@ -1,20 +1,8 @@
 use crate::{PektinError, PektinResult};
+use pektin_common::RedisValue;
 use redis::aio::Connection;
 use redis::{AsyncCommands, FromRedisValue, Value};
-use serde::{Deserialize, Serialize};
-use trust_dns_proto::rr::{Name, RData, RecordType};
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct ResourceRecord {
-    pub ttl: u32,
-    pub value: RData,
-}
-
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-pub struct RedisValue {
-    pub rr_type: RecordType,
-    pub rr_set: Vec<ResourceRecord>,
-}
+use trust_dns_proto::rr::{Name, RecordType};
 
 pub enum QueryResponse {
     Empty,

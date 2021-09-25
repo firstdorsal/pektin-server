@@ -1,33 +1,60 @@
 use dotenv::dotenv;
-use futures_util::StreamExt;
-use pektin::persistence::{get_rrset, QueryResponse};
-use pektin::{load_env, PektinError};
+use futures_util::{future, StreamExt};
+use pektin_common::load_env;
+use pektin_server::persistence::{get_rrset, QueryResponse};
+use pektin_server::{PektinError, PektinResult};
 use redis::Client;
 use std::error::Error;
+use std::net::Ipv6Addr;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
+use trust_dns_proto::iocompat::AsyncIoTokioAsStd;
 use trust_dns_proto::op::{Edns, Message, MessageType, ResponseCode};
 use trust_dns_proto::rr::Record;
+use trust_dns_proto::tcp::TcpStream;
 use trust_dns_proto::udp::UdpStream;
 use trust_dns_proto::xfer::{BufDnsStreamHandle, SerialMessage};
 use trust_dns_proto::DnsStreamHandle;
+use trust_dns_server::server::TimeoutStream;
 
-const D_BIND_ADDRESS: &'static str = "0.0.0.0";
-const D_BIND_PORT: &'static str = "53";
-const D_REDIS_URI: &'static str = "redis://pektin-redis:6379";
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Config {
+    pub bind_address: Ipv6Addr,
+    pub bind_port: u16,
+    pub redis_uri: String,
+    pub redis_retry_seconds: u64,
+    pub tcp_timeout_seconds: u64,
+}
+
+impl Config {
+    pub fn from_env() -> PektinResult<Self> {
+        Ok(Self {
+            bind_address: load_env("::", "BIND_ADDRESS")?.parse().map_err(|_| {
+                pektin_common::PektinCommonError::InvalidEnvVar("BIND_ADDRESS".into())
+            })?,
+            bind_port: load_env("53", "BIND_PORT")?
+                .parse()
+                .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("BIND_PORT".into()))?,
+            redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI")?,
+            redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS")?.parse().map_err(|_| {
+                pektin_common::PektinCommonError::InvalidEnvVar("REDIS_RETRY_SECONDS".into())
+            })?,
+            tcp_timeout_seconds: load_env("3", "TCP_TIMEOUT_SECONDS")?.parse().map_err(|_| {
+                pektin_common::PektinCommonError::InvalidEnvVar("TCP_TIMEOUT_SECONDS".into())
+            })?,
+        })
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     dotenv().ok();
 
     println!("Started Pektin with these globals:");
-    let redis_uri = load_env(D_REDIS_URI, "REDIS_URI");
-    let bind_address = load_env(D_BIND_ADDRESS, "BIND_ADDRESS");
-    let bind_port = load_env(D_BIND_PORT, "BIND_PORT");
-    let redis_retry_seconds = 3;
+    let config = Config::from_env()?;
 
-    let redis_client = Client::open(redis_uri)?;
+    let redis_client = Client::open(config.redis_uri.clone())?;
     let mut retry_count = 0;
     loop {
         match redis_client.get_async_connection().await {
@@ -36,19 +63,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 retry_count += 1;
                 eprintln!(
                     "Could not connect to redis, retrying in {} seconds... (retry {})",
-                    redis_retry_seconds, retry_count
+                    config.redis_retry_seconds, retry_count
                 );
-                std::thread::sleep(Duration::from_secs(redis_retry_seconds));
+                std::thread::sleep(Duration::from_secs(config.redis_retry_seconds));
             }
         }
     }
     let redis_client = Arc::new(redis_client);
-    let udp_client = redis_client.clone();
-
-    // TODO also listen for TCP requests
-    let udp_socket = UdpSocket::bind(format!("{}:{}", bind_address, bind_port)).await?;
 
     // see trust_dns_server::server::ServerFuture::register_socket
+    let udp_redis_client = redis_client.clone();
+    let udp_socket =
+        UdpSocket::bind(format!("[{}]:{}", &config.bind_address, config.bind_port)).await?;
     let (mut udp_stream, udp_handle) =
         UdpStream::with_bound(udp_socket, ([127, 255, 255, 254], 0).into());
     let udp_join_handle = tokio::spawn(async move {
@@ -63,17 +89,53 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let src_addr = message.addr();
             let udp_handle = udp_handle.with_remote_addr(src_addr);
-            let req_client = udp_client.clone();
+            let req_redis_client = udp_redis_client.clone();
             tokio::spawn(async move {
-                handle_request(message, udp_handle, req_client).await;
+                handle_request(message, udp_handle, req_redis_client).await;
             });
         }
     });
 
-    // TODO the same for TCP
-    // TODO then join the UDP and TCP handles
-    if let Err(e) = udp_join_handle.await {
-        eprintln!("UDP handling task returned error: {}", e)
+    // see trust_dns_server::server::ServerFuture::register_listener
+    let tcp_redis_client = redis_client.clone();
+    let tcp_listener =
+        TcpListener::bind(format!("[{}]:{}", &config.bind_address, config.bind_port)).await?;
+    let tcp_join_handle = tokio::spawn(async move {
+        loop {
+            let tcp_stream = match tcp_listener.accept().await {
+                Ok((t, _)) => t,
+                Err(e) => {
+                    eprintln!("Error creating a new TCP stream: {}", e);
+                    continue;
+                }
+            };
+
+            let req_redis_client = tcp_redis_client.clone();
+            tokio::spawn(async move {
+                let src_addr = tcp_stream.peer_addr().unwrap();
+                let (tcp_stream, tcp_handle) =
+                    TcpStream::from_stream(AsyncIoTokioAsStd(tcp_stream), src_addr);
+                // TODO maybe make this configurable via environment variable?
+                let mut timeout_stream = TimeoutStream::new(tcp_stream, Duration::from_secs(3));
+
+                while let Some(message) = timeout_stream.next().await {
+                    let message = match message {
+                        Ok(m) => m,
+                        Err(e) => {
+                            eprintln!("Error receiving TCP message: {}", e);
+                            return;
+                        }
+                    };
+
+                    handle_request(message, tcp_handle.clone(), req_redis_client.clone()).await;
+                }
+            });
+        }
+    });
+
+    let (res1, res2) = future::join(udp_join_handle, tcp_join_handle).await;
+    if res1.is_err() || res2.is_err() {
+        eprintln!("Internal error in tokio spawn")
     }
 
     Ok(())

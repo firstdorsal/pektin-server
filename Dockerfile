@@ -8,17 +8,17 @@ RUN cargo build-deps --release
 RUN rm -f target/x86_64-unknown-linux-musl/release/deps/pektin*
 # build
 ADD --chown=rust:rust . ./
-RUN cargo build --release --bin main
-RUN strip target/x86_64-unknown-linux-musl/release/main
+RUN cargo build --release --bin pektin_server
+RUN strip target/x86_64-unknown-linux-musl/release/pektin_server
 
 # 1. APP STAGE
 FROM alpine:latest
 WORKDIR /app
-COPY --from=build /home/rust/src/target/x86_64-unknown-linux-musl/release/main ./pektin
+COPY --from=build /home/rust/src/target/x86_64-unknown-linux-musl/release/pektin_server ./pektin_server
 # permissions
-RUN addgroup -g 1000 pektin
-RUN adduser -D -s /bin/sh -u 1000 -G pektin pektin
-RUN chown pektin:pektin pektin
-USER pektin
+RUN addgroup -g 1000 pektin_server
+RUN adduser -D -s /bin/sh -u 1000 -G pektin_server pektin_server
+RUN chown pektin_server:pektin_server pektin_server
+USER pektin_server
 # run it 
-CMD ./pektin
+CMD ./pektin_server

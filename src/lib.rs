@@ -8,6 +8,8 @@ pub use trust_dns_proto as proto;
 pub enum PektinError {
     #[error("redis error")]
     RedisError(#[from] redis::RedisError),
+    #[error("cannot connect to redis")]
+    NoRedisConnection,
     #[error("could not (de)serialize JSON: `{0}`")]
     JsonError(#[from] serde_json::Error),
     #[error("invalid DNS data")]

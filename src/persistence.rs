@@ -1,5 +1,6 @@
 use crate::{PektinError, PektinResult};
-use redis::{Commands, Connection, FromRedisValue, Value};
+use redis::aio::Connection;
+use redis::{AsyncCommands, FromRedisValue, Value};
 use serde::{Deserialize, Serialize};
 use trust_dns_proto::rr::{Name, RData, RecordType};
 
@@ -26,14 +27,14 @@ pub enum QueryResponse {
 }
 
 // also automatically looks for a wildcard record
-pub fn get_rrset(
+pub async fn get_rrset(
     con: &mut Connection,
     zone: &Name,
     rr_type: RecordType,
 ) -> PektinResult<QueryResponse> {
     let definitive_key = format!("{}:{}", zone, rr_type);
     let wildcard_key = format!("{}:{}", zone.clone().into_wildcard(), rr_type);
-    let res: Vec<Value> = con.get(vec![definitive_key, wildcard_key])?;
+    let res: Vec<Value> = con.get(vec![definitive_key, wildcard_key]).await?;
     if res.len() != 2 {
         return Err(PektinError::InvalidRedisData);
     }

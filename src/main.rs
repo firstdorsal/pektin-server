@@ -164,6 +164,7 @@ async fn handle_request(
     response.set_op_code(message.op_code());
     response.set_recursion_desired(message.recursion_desired());
     response.set_recursion_available(false);
+    response.set_authoritative(true);
 
     // TODO: check how to handle wildcards according to the relevant RFCs
     // (does a.b.example.com match *.example.com?)

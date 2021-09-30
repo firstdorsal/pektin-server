@@ -219,6 +219,7 @@ async fn handle_request(
             if let Ok(redis_response) = res {
                 let rr_set = match redis_response {
                     QueryResponse::Empty => {
+                        response.set_response_code(ResponseCode::Refused);
                         vec![]
                     }
                     QueryResponse::Definitive(def) => def.rr_set,
@@ -239,6 +240,7 @@ async fn handle_request(
                 response.set_response_code(ResponseCode::ServFail);
             }
         } else {
+            // TODO is that right?
             response.set_response_code(ResponseCode::Refused);
         }
     }

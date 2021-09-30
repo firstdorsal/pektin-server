@@ -193,7 +193,7 @@ async fn handle_request(
         let res = get_rrset(&mut con, q.name(), q.query_type()).await;
         if let Ok(redis_response) = res {
             let rr_set = match redis_response {
-                QueryResponse::Empty => vec![],
+                QueryResponse::Empty => continue,
                 QueryResponse::Definitive(def) => def.rr_set,
                 QueryResponse::Wildcard(wild) => wild.rr_set,
                 QueryResponse::Both { definitive, .. } => definitive.rr_set,

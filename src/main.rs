@@ -231,10 +231,6 @@ async fn handle_request(
                     // the name is a bit misleading; this adds the record to the authority section
                     response.add_name_server(rr);
                 }
-
-                let mut edns = Edns::new();
-                edns.set_max_payload(4096);
-                response.set_edns(edns);
             } else {
                 eprintln!("{}", res.err().unwrap());
                 response.set_response_code(ResponseCode::ServFail);

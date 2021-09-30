@@ -164,6 +164,10 @@ async fn handle_request(
     response.set_recursion_available(false);
     response.set_authoritative(true);
 
+    let mut edns = Edns::new();
+    edns.set_max_payload(4096);
+    response.set_edns(edns);
+
     let mut con = match redis_client.get_async_connection().await {
         Ok(c) => c,
         Err(_) => {
@@ -240,10 +244,6 @@ async fn handle_request(
             response.set_response_code(ResponseCode::Refused);
         }
     }
-
-    let mut edns = Edns::new();
-    edns.set_max_payload(4096);
-    response.set_edns(edns);
 
     // copy queries
     response.add_queries(message.take_queries().into_iter());

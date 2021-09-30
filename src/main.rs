@@ -182,6 +182,8 @@ async fn handle_request(
 
     // needed later for querying the SOA record if no query could be answered
     let mut zone_name = None;
+    // keep track if we added an answer into the message (response.answer_count() doesn't automatically update)
+    let mut answer_stored = false;
 
     for q in message.queries() {
         if zone_name.is_none() {
@@ -191,9 +193,7 @@ async fn handle_request(
         let res = get_rrset(&mut con, q.name(), q.query_type()).await;
         if let Ok(redis_response) = res {
             let rr_set = match redis_response {
-                QueryResponse::Empty => {
-                    vec![]
-                }
+                QueryResponse::Empty => vec![],
                 QueryResponse::Definitive(def) => def.rr_set,
                 QueryResponse::Wildcard(wild) => wild.rr_set,
                 QueryResponse::Both { definitive, .. } => definitive.rr_set,
@@ -202,10 +202,7 @@ async fn handle_request(
                 let rr = Record::from_rdata(q.name().clone(), record.ttl, record.value);
                 response.add_answer(rr);
             }
-
-            let mut edns = Edns::new();
-            edns.set_max_payload(4096);
-            response.set_edns(edns);
+            answer_stored = true;
         } else {
             eprintln!("{}", res.err().unwrap());
             response.set_response_code(ResponseCode::ServFail);
@@ -213,7 +210,7 @@ async fn handle_request(
         }
     }
 
-    if (response.answer_count() == 0) && (response.response_code() != ResponseCode::ServFail) {
+    if !answer_stored && (response.response_code() != ResponseCode::ServFail) {
         if let Some(name) = zone_name {
             let res = get_rrset(&mut con, name, RecordType::SOA).await;
             if let Ok(redis_response) = res {
@@ -238,9 +235,13 @@ async fn handle_request(
                 response.set_response_code(ResponseCode::ServFail);
             }
         } else {
-            // what now?
+            // TODO what now?
         }
     }
+
+    let mut edns = Edns::new();
+    edns.set_max_payload(4096);
+    response.set_edns(edns);
 
     // copy queries
     response.add_queries(message.take_queries().into_iter());

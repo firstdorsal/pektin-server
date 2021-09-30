@@ -38,7 +38,7 @@ fn main() -> PektinResult<()> {
     let mx = RData::MX(MX::new(10, name.clone()));
     let txt = RData::TXT(TXT::new(vec!["string".into()]));
     let pgp = RData::OPENPGPKEY(OPENPGPKEY::new(vec![0, 1, 2, 3]));
-    let srv = RData::SRV(SRV::new(10, 10, 10, name.clone()));
+    let srv = RData::SRV(SRV::new(10, 10, 10, name));
     let dnskey = RData::DNSSEC(DNSSECRData::DNSKEY(DNSKEY::new(
         true,
         true,

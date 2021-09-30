@@ -2,7 +2,7 @@ use dotenv::dotenv;
 use futures_util::{future, StreamExt};
 use pektin_common::load_env;
 use pektin_server::persistence::{get_rrset, QueryResponse};
-use pektin_server::{PektinError, PektinResult};
+use pektin_server::PektinResult;
 use redis::Client;
 use std::error::Error;
 use std::net::Ipv6Addr;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use trust_dns_proto::iocompat::AsyncIoTokioAsStd;
 use trust_dns_proto::op::{Edns, Message, MessageType, ResponseCode};
-use trust_dns_proto::rr::Record;
+use trust_dns_proto::rr::{Record, RecordType};
 use trust_dns_proto::tcp::TcpStream;
 use trust_dns_proto::udp::UdpStream;
 use trust_dns_proto::xfer::{BufDnsStreamHandle, SerialMessage};
@@ -143,20 +143,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 async fn handle_request(
     msg: SerialMessage,
-    mut stream_handle: BufDnsStreamHandle,
+    stream_handle: BufDnsStreamHandle,
     redis_client: Arc<Client>,
 ) {
     // TODO: better error logging (use https://git.sr.ht/~mvforell/ddc-ci/tree/master/item/src/daemon_data.rs#L90 ?)
 
-    let message = match msg.to_message() {
+    let mut message = match msg.to_message() {
         Ok(m) => m,
         _ => {
             eprintln!("Could not deserialize received message");
             return;
         }
     };
-
-    // TODO if m.queries().len() == 0
 
     let mut response = Message::new();
     response.set_id(message.id());
@@ -166,37 +164,91 @@ async fn handle_request(
     response.set_recursion_available(false);
     response.set_authoritative(true);
 
+    let mut con = match redis_client.get_async_connection().await {
+        Ok(c) => c,
+        Err(_) => {
+            response.set_response_code(ResponseCode::ServFail);
+
+            // copy queries
+            response.add_queries(message.take_queries().into_iter());
+
+            send_response(msg, response, stream_handle);
+            return;
+        }
+    };
+
     // TODO: check how to handle wildcards according to the relevant RFCs
     // (does a.b.example.com match *.example.com?)
-    let q = &message.queries()[0];
-    let res = match redis_client.get_async_connection().await {
-        Ok(mut con) => get_rrset(&mut con, q.name(), q.query_type()).await,
-        Err(_) => Err(PektinError::NoRedisConnection),
-    };
-    if let Ok(redis_response) = res {
-        let rr_set = match redis_response {
-            QueryResponse::Empty => {
-                // TODO: return SOA?
-                response.set_response_code(ResponseCode::NXDomain);
-                vec![]
-            }
-            QueryResponse::Definitive(def) => def.rr_set,
-            QueryResponse::Wildcard(wild) => wild.rr_set,
-            QueryResponse::Both { definitive, .. } => definitive.rr_set,
-        };
-        for record in rr_set {
-            let rr = Record::from_rdata(q.name().clone(), record.ttl, record.value);
-            response.add_answer(rr);
+
+    // needed later for querying the SOA record if no query could be answered
+    let mut zone_name = None;
+
+    for q in message.queries() {
+        if zone_name.is_none() {
+            zone_name = Some(q.name());
         }
 
-        let mut edns = Edns::new();
-        edns.set_max_payload(4096);
-        response.set_edns(edns);
-    } else {
-        eprintln!("{}", res.err().unwrap());
-        response.set_response_code(ResponseCode::ServFail);
+        let res = get_rrset(&mut con, q.name(), q.query_type()).await;
+        if let Ok(redis_response) = res {
+            let rr_set = match redis_response {
+                QueryResponse::Empty => {
+                    vec![]
+                }
+                QueryResponse::Definitive(def) => def.rr_set,
+                QueryResponse::Wildcard(wild) => wild.rr_set,
+                QueryResponse::Both { definitive, .. } => definitive.rr_set,
+            };
+            for record in rr_set {
+                let rr = Record::from_rdata(q.name().clone(), record.ttl, record.value);
+                response.add_answer(rr);
+            }
+
+            let mut edns = Edns::new();
+            edns.set_max_payload(4096);
+            response.set_edns(edns);
+        } else {
+            eprintln!("{}", res.err().unwrap());
+            response.set_response_code(ResponseCode::ServFail);
+            break;
+        }
     }
 
+    if (response.answer_count() == 0) && (response.response_code() != ResponseCode::ServFail) {
+        if let Some(name) = zone_name {
+            let res = get_rrset(&mut con, name, RecordType::SOA).await;
+            if let Ok(redis_response) = res {
+                let rr_set = match redis_response {
+                    QueryResponse::Empty => {
+                        vec![]
+                    }
+                    QueryResponse::Definitive(def) => def.rr_set,
+                    QueryResponse::Wildcard(wild) => wild.rr_set,
+                    QueryResponse::Both { definitive, .. } => definitive.rr_set,
+                };
+                for record in rr_set {
+                    let rr = Record::from_rdata(name.clone(), record.ttl, record.value);
+                    response.add_answer(rr);
+                }
+
+                let mut edns = Edns::new();
+                edns.set_max_payload(4096);
+                response.set_edns(edns);
+            } else {
+                eprintln!("{}", res.err().unwrap());
+                response.set_response_code(ResponseCode::ServFail);
+            }
+        } else {
+            // what now?
+        }
+    }
+
+    // copy queries
+    response.add_queries(message.take_queries().into_iter());
+
+    send_response(msg, response, stream_handle);
+}
+
+fn send_response(query: SerialMessage, response: Message, mut stream_handle: BufDnsStreamHandle) {
     let response_bytes = match response.to_vec() {
         Ok(b) => b,
         Err(e) => {
@@ -204,7 +256,7 @@ async fn handle_request(
             return;
         }
     };
-    let serialized_response = SerialMessage::new(response_bytes, msg.addr());
+    let serialized_response = SerialMessage::new(response_bytes, query.addr());
     if let Err(e) = stream_handle.send(serialized_response) {
         eprintln!("Could not send response: {}", e);
     }

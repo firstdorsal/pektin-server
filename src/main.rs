@@ -212,6 +212,9 @@ async fn handle_request(
 
     if !answer_stored && (response.response_code() != ResponseCode::ServFail) {
         if let Some(name) = zone_name {
+            // TODO see https://git.y.gy/pektin/pektin-server/-/issues/2
+            let name = name;
+
             let res = get_rrset(&mut con, name, RecordType::SOA).await;
             if let Ok(redis_response) = res {
                 let rr_set = match redis_response {
@@ -224,7 +227,8 @@ async fn handle_request(
                 };
                 for record in rr_set {
                     let rr = Record::from_rdata(name.clone(), record.ttl, record.value);
-                    response.add_answer(rr);
+                    // the name is a bit misleading; this adds the record to the authority section
+                    response.add_name_server(rr);
                 }
 
                 let mut edns = Edns::new();
@@ -235,7 +239,7 @@ async fn handle_request(
                 response.set_response_code(ResponseCode::ServFail);
             }
         } else {
-            // TODO what now?
+            response.set_response_code(ResponseCode::Refused);
         }
     }
 

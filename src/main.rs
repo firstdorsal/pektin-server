@@ -1,12 +1,10 @@
+use deadpool_redis::Pool;
 use dotenv::dotenv;
 use futures_util::{future, StreamExt};
 use pektin_common::load_env;
 use pektin_server::persistence::{get_rrset, QueryResponse};
 use pektin_server::PektinResult;
-use redis::Client;
-use std::error::Error;
 use std::net::Ipv6Addr;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use trust_dns_proto::iocompat::AsyncIoTokioAsStd;
@@ -48,31 +46,21 @@ impl Config {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> PektinResult<()> {
     dotenv().ok();
 
     println!("Started Pektin with these globals:");
     let config = Config::from_env()?;
 
-    let redis_client = Client::open(config.redis_uri.clone())?;
-    let mut retry_count = 0;
-    loop {
-        match redis_client.get_async_connection().await {
-            Ok(_) => break,
-            Err(_) => {
-                retry_count += 1;
-                eprintln!(
-                    "Could not connect to redis, retrying in {} seconds... (retry {})",
-                    config.redis_retry_seconds, retry_count
-                );
-                std::thread::sleep(Duration::from_secs(config.redis_retry_seconds));
-            }
-        }
-    }
-    let redis_client = Arc::new(redis_client);
+    let redis_pool_conf = deadpool_redis::Config {
+        url: Some(config.redis_uri.clone()),
+        connection: None,
+        pool: None,
+    };
+    let redis_pool = redis_pool_conf.create_pool()?;
 
     // see trust_dns_server::server::ServerFuture::register_socket
-    let udp_redis_client = redis_client.clone();
+    let udp_redis_pool = redis_pool.clone();
     let udp_socket =
         UdpSocket::bind(format!("[{}]:{}", &config.bind_address, config.bind_port)).await?;
     let (mut udp_stream, udp_handle) =
@@ -89,15 +77,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
             let src_addr = message.addr();
             let udp_handle = udp_handle.with_remote_addr(src_addr);
-            let req_redis_client = udp_redis_client.clone();
+            let req_redis_pool = udp_redis_pool.clone();
             tokio::spawn(async move {
-                handle_request(message, udp_handle, req_redis_client).await;
+                handle_request(message, udp_handle, req_redis_pool).await;
             });
         }
     });
 
     // see trust_dns_server::server::ServerFuture::register_listener
-    let tcp_redis_client = redis_client.clone();
+    let tcp_redis_pool = redis_pool.clone();
     let tcp_listener =
         TcpListener::bind(format!("[{}]:{}", &config.bind_address, config.bind_port)).await?;
     let tcp_join_handle = tokio::spawn(async move {
@@ -110,7 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
             };
 
-            let req_redis_client = tcp_redis_client.clone();
+            let req_redis_pool = tcp_redis_pool.clone();
             tokio::spawn(async move {
                 let src_addr = tcp_stream.peer_addr().unwrap();
                 let (tcp_stream, tcp_handle) =
@@ -127,7 +115,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     };
 
-                    handle_request(message, tcp_handle.clone(), req_redis_client.clone()).await;
+                    handle_request(message, tcp_handle.clone(), req_redis_pool.clone()).await;
                 }
             });
         }
@@ -141,11 +129,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-async fn handle_request(
-    msg: SerialMessage,
-    stream_handle: BufDnsStreamHandle,
-    redis_client: Arc<Client>,
-) {
+async fn handle_request(msg: SerialMessage, stream_handle: BufDnsStreamHandle, redis_pool: Pool) {
     // TODO: better error logging (use https://git.sr.ht/~mvforell/ddc-ci/tree/master/item/src/daemon_data.rs#L90 ?)
 
     let mut message = match msg.to_message() {
@@ -168,7 +152,7 @@ async fn handle_request(
     edns.set_max_payload(4096);
     response.set_edns(edns);
 
-    let mut con = match redis_client.get_async_connection().await {
+    let mut con = match redis_pool.get().await {
         Ok(c) => c,
         Err(_) => {
             response.set_response_code(ResponseCode::ServFail);

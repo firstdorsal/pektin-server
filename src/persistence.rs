@@ -1,7 +1,7 @@
 use crate::{PektinError, PektinResult};
+use deadpool_redis::redis::aio::Connection;
+use deadpool_redis::redis::{AsyncCommands, FromRedisValue, Value};
 use pektin_common::RedisValue;
-use redis::aio::Connection;
-use redis::{AsyncCommands, FromRedisValue, Value};
 use trust_dns_proto::rr::{Name, RecordType};
 
 pub enum QueryResponse {

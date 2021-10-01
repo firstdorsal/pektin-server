@@ -28,19 +28,23 @@ struct Config {
 impl Config {
     pub fn from_env() -> PektinResult<Self> {
         Ok(Self {
-            bind_address: load_env("::", "BIND_ADDRESS")?.parse().map_err(|_| {
+            bind_address: load_env("::", "BIND_ADDRESS", true)?.parse().map_err(|_| {
                 pektin_common::PektinCommonError::InvalidEnvVar("BIND_ADDRESS".into())
             })?,
-            bind_port: load_env("53", "BIND_PORT")?
+            bind_port: load_env("53", "BIND_PORT", true)?
                 .parse()
                 .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("BIND_PORT".into()))?,
-            redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI")?,
-            redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS")?.parse().map_err(|_| {
-                pektin_common::PektinCommonError::InvalidEnvVar("REDIS_RETRY_SECONDS".into())
-            })?,
-            tcp_timeout_seconds: load_env("3", "TCP_TIMEOUT_SECONDS")?.parse().map_err(|_| {
-                pektin_common::PektinCommonError::InvalidEnvVar("TCP_TIMEOUT_SECONDS".into())
-            })?,
+            redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI", true)?,
+            redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS", true)?
+                .parse()
+                .map_err(|_| {
+                    pektin_common::PektinCommonError::InvalidEnvVar("REDIS_RETRY_SECONDS".into())
+                })?,
+            tcp_timeout_seconds: load_env("3", "TCP_TIMEOUT_SECONDS", true)?
+                .parse()
+                .map_err(|_| {
+                    pektin_common::PektinCommonError::InvalidEnvVar("TCP_TIMEOUT_SECONDS".into())
+                })?,
         })
     }
 }

@@ -1,16 +1,16 @@
 use crate::{PektinError, PektinResult};
 use deadpool_redis::redis::aio::Connection;
 use deadpool_redis::redis::{AsyncCommands, FromRedisValue, Value};
-use pektin_common::RedisValue;
+use pektin_common::RedisEntry;
 use trust_dns_proto::rr::{Name, RecordType};
 
 pub enum QueryResponse {
     Empty,
-    Definitive(RedisValue),
-    Wildcard(RedisValue),
+    Definitive(RedisEntry),
+    Wildcard(RedisEntry),
     Both {
-        definitive: RedisValue,
-        wildcard: RedisValue,
+        definitive: RedisEntry,
+        wildcard: RedisEntry,
     },
 }
 

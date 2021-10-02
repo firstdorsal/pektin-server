@@ -1,4 +1,3 @@
-use pektin_common::{RedisValue, ResourceRecord};
 use pektin_server::PektinResult;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
@@ -10,7 +9,6 @@ use trust_dns_proto::rr::rdata::tlsa::Matching;
 use trust_dns_proto::rr::rdata::tlsa::Selector;
 use trust_dns_proto::rr::rdata::TLSA;
 use trust_dns_proto::rr::rdata::{CAA, MX, OPENPGPKEY, SOA, SRV, TXT};
-use trust_dns_proto::rr::RecordType;
 use trust_dns_proto::rr::{Name, RData};
 use url::Url;
 
@@ -66,21 +64,6 @@ fn main() -> PektinResult<()> {
     println!("{}", serde_json::to_string(&srv)?);
     println!("{}", serde_json::to_string(&dnskey)?);
     println!("{}", serde_json::to_string(&tlsa)?);
-
-    let rrset = RedisValue {
-        rr_type: RecordType::A,
-        rr_set: vec![
-            ResourceRecord {
-                ttl: 300,
-                value: a.clone(),
-            },
-            ResourceRecord {
-                ttl: 3600,
-                value: a,
-            },
-        ],
-    };
-    println!("{}", serde_json::to_string(&rrset)?);
 
     Ok(())
 }

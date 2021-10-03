@@ -1,19 +1,19 @@
-use deadpool_redis::Pool;
 use dotenv::dotenv;
 use futures_util::{future, StreamExt};
+use pektin_common::deadpool_redis::Pool;
 use pektin_common::load_env;
+use pektin_common::proto::iocompat::AsyncIoTokioAsStd;
+use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
+use pektin_common::proto::rr::{Record, RecordType};
+use pektin_common::proto::tcp::TcpStream;
+use pektin_common::proto::udp::UdpStream;
+use pektin_common::proto::xfer::{BufDnsStreamHandle, SerialMessage};
+use pektin_common::proto::DnsStreamHandle;
 use pektin_server::persistence::{get_rrset, QueryResponse};
 use pektin_server::PektinResult;
 use std::net::Ipv6Addr;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
-use trust_dns_proto::iocompat::AsyncIoTokioAsStd;
-use trust_dns_proto::op::{Edns, Message, MessageType, ResponseCode};
-use trust_dns_proto::rr::{Record, RecordType};
-use trust_dns_proto::tcp::TcpStream;
-use trust_dns_proto::udp::UdpStream;
-use trust_dns_proto::xfer::{BufDnsStreamHandle, SerialMessage};
-use trust_dns_proto::DnsStreamHandle;
 use trust_dns_server::server::TimeoutStream;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,19 +28,21 @@ struct Config {
 impl Config {
     pub fn from_env() -> PektinResult<Self> {
         Ok(Self {
-            bind_address: load_env("::", "BIND_ADDRESS", true)?.parse().map_err(|_| {
-                pektin_common::PektinCommonError::InvalidEnvVar("BIND_ADDRESS".into())
-            })?,
-            bind_port: load_env("53", "BIND_PORT", true)?
+            bind_address: load_env("::", "BIND_ADDRESS", false)?
+                .parse()
+                .map_err(|_| {
+                    pektin_common::PektinCommonError::InvalidEnvVar("BIND_ADDRESS".into())
+                })?,
+            bind_port: load_env("53", "BIND_PORT", false)?
                 .parse()
                 .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("BIND_PORT".into()))?,
-            redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI", true)?,
-            redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS", true)?
+            redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI", false)?,
+            redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS", false)?
                 .parse()
                 .map_err(|_| {
                     pektin_common::PektinCommonError::InvalidEnvVar("REDIS_RETRY_SECONDS".into())
                 })?,
-            tcp_timeout_seconds: load_env("3", "TCP_TIMEOUT_SECONDS", true)?
+            tcp_timeout_seconds: load_env("3", "TCP_TIMEOUT_SECONDS", false)?
                 .parse()
                 .map_err(|_| {
                     pektin_common::PektinCommonError::InvalidEnvVar("TCP_TIMEOUT_SECONDS".into())
@@ -56,7 +58,7 @@ async fn main() -> PektinResult<()> {
     println!("Started Pektin with these globals:");
     let config = Config::from_env()?;
 
-    let redis_pool_conf = deadpool_redis::Config {
+    let redis_pool_conf = pektin_common::deadpool_redis::Config {
         url: Some(config.redis_uri.clone()),
         connection: None,
         pool: None,

@@ -1,15 +1,15 @@
+use pektin_common::proto::rr::dnssec::rdata::DNSSECRData;
+use pektin_common::proto::rr::dnssec::rdata::DNSKEY;
+use pektin_common::proto::rr::dnssec::Algorithm;
+use pektin_common::proto::rr::rdata::tlsa::CertUsage;
+use pektin_common::proto::rr::rdata::tlsa::Matching;
+use pektin_common::proto::rr::rdata::tlsa::Selector;
+use pektin_common::proto::rr::rdata::TLSA;
+use pektin_common::proto::rr::rdata::{CAA, MX, OPENPGPKEY, SOA, SRV, TXT};
+use pektin_common::proto::rr::{Name, RData};
 use pektin_server::PektinResult;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::str::FromStr;
-use trust_dns_proto::rr::dnssec::rdata::DNSSECRData;
-use trust_dns_proto::rr::dnssec::rdata::DNSKEY;
-use trust_dns_proto::rr::dnssec::Algorithm;
-use trust_dns_proto::rr::rdata::tlsa::CertUsage;
-use trust_dns_proto::rr::rdata::tlsa::Matching;
-use trust_dns_proto::rr::rdata::tlsa::Selector;
-use trust_dns_proto::rr::rdata::TLSA;
-use trust_dns_proto::rr::rdata::{CAA, MX, OPENPGPKEY, SOA, SRV, TXT};
-use trust_dns_proto::rr::{Name, RData};
 use url::Url;
 
 fn main() -> PektinResult<()> {

@@ -1,7 +1,6 @@
 use dotenv::dotenv;
 use futures_util::{future, StreamExt};
 use pektin_common::deadpool_redis::Pool;
-use pektin_common::load_env;
 use pektin_common::proto::iocompat::AsyncIoTokioAsStd;
 use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
 use pektin_common::proto::rr::{Record, RecordType};
@@ -9,6 +8,7 @@ use pektin_common::proto::tcp::TcpStream;
 use pektin_common::proto::udp::UdpStream;
 use pektin_common::proto::xfer::{BufDnsStreamHandle, SerialMessage};
 use pektin_common::proto::DnsStreamHandle;
+use pektin_common::{get_authoritative_zones, load_env};
 use pektin_server::persistence::{get_rrset, QueryResponse};
 use pektin_server::PektinResult;
 use std::net::Ipv6Addr;
@@ -205,28 +205,41 @@ async fn handle_request(msg: SerialMessage, stream_handle: BufDnsStreamHandle, r
     }
 
     if !answer_stored && (response.response_code() != ResponseCode::ServFail) {
-        if let Some(name) = zone_name {
-            // TODO see https://git.y.gy/pektin/pektin-server/-/issues/2
-            let name = name;
-
-            let res = get_rrset(&mut con, name, RecordType::SOA).await;
-            if let Ok(redis_response) = res {
-                let rr_set = match redis_response {
-                    QueryResponse::Empty => {
-                        response.set_response_code(ResponseCode::Refused);
-                        vec![]
+        if let Some(queried_name) = zone_name {
+            if let Ok(authoritative_zones) = get_authoritative_zones(&mut con).await {
+                if let Some(auth_zone) = authoritative_zones
+                    .into_iter()
+                    .find(|zone| zone.zone_of(&queried_name))
+                {
+                    let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
+                    if let Ok(redis_response) = res {
+                        let rr_set = match redis_response {
+                            QueryResponse::Empty => {
+                                response.set_response_code(ResponseCode::Refused);
+                                vec![]
+                            }
+                            QueryResponse::Definitive(def) => def.rr_set,
+                            QueryResponse::Wildcard(wild) => wild.rr_set,
+                            QueryResponse::Both { definitive, .. } => definitive.rr_set,
+                        };
+                        for record in rr_set {
+                            // get the name of the authoritative zone, preserving the case of the queried name
+                            let mut soa_name = queried_name.clone();
+                            while soa_name.num_labels() != auth_zone.num_labels() {
+                                soa_name = soa_name.base_name();
+                            }
+                            let rr = Record::from_rdata(soa_name, record.ttl, record.value);
+                            // the name is a bit misleading; this adds the record to the authority section
+                            response.add_name_server(rr);
+                            response.set_response_code(ResponseCode::NXDomain);
+                        }
+                    } else {
+                        response.set_response_code(ResponseCode::ServFail);
                     }
-                    QueryResponse::Definitive(def) => def.rr_set,
-                    QueryResponse::Wildcard(wild) => wild.rr_set,
-                    QueryResponse::Both { definitive, .. } => definitive.rr_set,
-                };
-                for record in rr_set {
-                    let rr = Record::from_rdata(name.clone(), record.ttl, record.value);
-                    // the name is a bit misleading; this adds the record to the authority section
-                    response.add_name_server(rr);
+                } else {
+                    response.set_response_code(ResponseCode::Refused);
                 }
             } else {
-                eprintln!("{}", res.err().unwrap());
                 response.set_response_code(ResponseCode::ServFail);
             }
         } else {

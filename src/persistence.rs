@@ -20,6 +20,7 @@ pub async fn get_rrset(
     zone: &Name,
     rr_type: RecordType,
 ) -> PektinResult<QueryResponse> {
+    let zone = zone.to_lowercase();
     let definitive_key = format!("{}:{}", zone, rr_type);
     let wildcard_key = format!("{}:{}", zone.clone().into_wildcard(), rr_type);
     let res: Vec<Value> = con.get(vec![definitive_key, wildcard_key]).await?;

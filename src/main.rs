@@ -3,7 +3,7 @@ use futures_util::{future, StreamExt};
 use pektin_common::deadpool_redis::Pool;
 use pektin_common::proto::iocompat::AsyncIoTokioAsStd;
 use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
-use pektin_common::proto::rr::{Record, RecordType};
+use pektin_common::proto::rr::{Name, Record, RecordType};
 use pektin_common::proto::tcp::TcpStream;
 use pektin_common::proto::udp::UdpStream;
 use pektin_common::proto::xfer::{BufDnsStreamHandle, SerialMessage};
@@ -211,6 +211,9 @@ async fn handle_request(msg: SerialMessage, stream_handle: BufDnsStreamHandle, r
             if let Ok(authoritative_zones) = get_authoritative_zones(&mut con).await {
                 if let Some(auth_zone) = authoritative_zones
                     .into_iter()
+                    .map(|zone| {
+                        Name::from_utf8(zone).expect("Name in redis is not a valid DNS name")
+                    })
                     .find(|zone| zone.zone_of(&queried_name))
                 {
                     let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;

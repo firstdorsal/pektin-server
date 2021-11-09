@@ -45,9 +45,9 @@ fn main() -> PektinResult<()> {
         vec![0, 1, 2, 3],
     )));
     let tlsa = RData::TLSA(TLSA::new(
-        CertUsage::CA,
-        Selector::Full,
-        Matching::Sha256,
+        CertUsage::CA,    // CA Service TrustAnchor DomainIssued
+        Selector::Full,   // Full Spki
+        Matching::Sha256, // Raw Sha256 Sha512
         vec![0, 1, 2, 3],
     ));
 

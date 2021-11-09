@@ -21,6 +21,7 @@ struct Config {
     pub bind_address: Ipv6Addr,
     pub bind_port: u16,
     pub redis_uri: String,
+    pub redis_password: String,
     pub redis_retry_seconds: u64,
     pub tcp_timeout_seconds: u64,
 }
@@ -37,6 +38,7 @@ impl Config {
                 .parse()
                 .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("BIND_PORT".into()))?,
             redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI", false)?,
+            redis_password: load_env("", "R_PEKTIN_SERVER_PASSWORD", true)?,
             redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS", false)?
                 .parse()
                 .map_err(|_| {

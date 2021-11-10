@@ -21,7 +21,6 @@ struct Config {
     pub bind_address: Ipv6Addr,
     pub bind_port: u16,
     pub redis_uri: String,
-    pub redis_password: String,
     pub redis_retry_seconds: u64,
     pub tcp_timeout_seconds: u64,
 }
@@ -38,7 +37,6 @@ impl Config {
                 .parse()
                 .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("BIND_PORT".into()))?,
             redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI", false)?,
-            redis_password: load_env("", "R_PEKTIN_SERVER_PASSWORD", true)?,
             redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS", false)?
                 .parse()
                 .map_err(|_| {
@@ -195,7 +193,15 @@ async fn handle_request(msg: SerialMessage, stream_handle: BufDnsStreamHandle, r
                 QueryResponse::Both { definitive, .. } => definitive.rr_set,
             };
             for record in rr_set {
-                let rr = Record::from_rdata(q.name().clone(), record.ttl, record.value);
+                let rdata = match record.value.convert() {
+                    Ok(r) => r,
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        response.set_response_code(ResponseCode::ServFail);
+                        break;
+                    }
+                };
+                let rr = Record::from_rdata(q.name().clone(), record.ttl, rdata);
                 response.add_answer(rr);
             }
             answer_stored = true;
@@ -233,7 +239,15 @@ async fn handle_request(msg: SerialMessage, stream_handle: BufDnsStreamHandle, r
                             while soa_name.num_labels() != auth_zone.num_labels() {
                                 soa_name = soa_name.base_name();
                             }
-                            let rr = Record::from_rdata(soa_name, record.ttl, record.value);
+                            let rdata = match record.value.convert() {
+                                Ok(r) => r,
+                                Err(err) => {
+                                    eprintln!("{}", err);
+                                    response.set_response_code(ResponseCode::ServFail);
+                                    break;
+                                }
+                            };
+                            let rr = Record::from_rdata(soa_name, record.ttl, rdata);
                             // the name is a bit misleading; this adds the record to the authority section
                             response.add_name_server(rr);
                             response.set_response_code(ResponseCode::NXDomain);

@@ -1,5 +1,6 @@
 use thiserror::Error;
 
+pub mod doh;
 pub mod persistence;
 
 #[derive(Debug, Error)]

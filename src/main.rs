@@ -16,6 +16,8 @@ use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use trust_dns_server::server::TimeoutStream;
 
+mod doh;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
     pub bind_address: Ipv6Addr,
@@ -23,6 +25,9 @@ struct Config {
     pub redis_uri: String,
     pub redis_retry_seconds: u64,
     pub tcp_timeout_seconds: u64,
+    pub use_doh: bool,
+    pub doh_bind_address: Ipv6Addr,
+    pub doh_bind_port: u16,
 }
 
 impl Config {
@@ -47,6 +52,17 @@ impl Config {
                 .map_err(|_| {
                     pektin_common::PektinCommonError::InvalidEnvVar("TCP_TIMEOUT_SECONDS".into())
                 })?,
+            use_doh: load_env("true", "USE_DOH", false).unwrap() == "true",
+            doh_bind_port: load_env("80", "DOH_BIND_PORT", false)?
+                .parse()
+                .map_err(|_| {
+                    pektin_common::PektinCommonError::InvalidEnvVar("DOH_BIND_PORT".into())
+                })?,
+            doh_bind_address: load_env("::", "DOH_BIND_ADDRESS", false)?
+                .parse()
+                .map_err(|_| {
+                    pektin_common::PektinCommonError::InvalidEnvVar("DOH_BIND_ADDRESS".into())
+                })?,
         })
     }
 }
@@ -64,6 +80,11 @@ async fn main() -> PektinResult<()> {
         pool: None,
     };
     let redis_pool = redis_pool_conf.create_pool()?;
+
+    if config.use_doh {
+        doh::use_doh(config.doh_bind_address, config.bind_port)
+            .expect("DOH server couldn't be started");
+    }
 
     // see trust_dns_server::server::ServerFuture::register_socket
     let udp_redis_pool = redis_pool.clone();

@@ -54,6 +54,13 @@
 }
 ```
 
+doh via curl:
+
+```sh
+curl -v '[::]:42069/dns-query?dns=base64'
+curl -v -H 'Content-Type: application/dns-message' -d 'deadbeef' '[::]:42069/dns-query'
+```
+
 dnssec signing workflow:
 
 -   construct a rrsig record with its rdata containing an empty vec as the signature

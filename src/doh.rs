@@ -7,7 +7,6 @@ use pektin_common::proto::op::Message;
 use serde::Deserialize;
 use std::net::Ipv6Addr;
 
-#[actix_web::main]
 pub async fn use_doh(
     bind_address: Ipv6Addr,
     bind_port: u16,

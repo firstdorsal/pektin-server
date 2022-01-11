@@ -85,7 +85,9 @@ async fn main() -> PektinResult<()> {
             config.doh_bind_address,
             config.doh_bind_port,
             doh_redis_pool,
-        ) {
+        )
+        .await
+        {
             Ok(server) => Some(server),
             Err(e) => {
                 eprintln!("Error while trying to start DOH server: {}", e);

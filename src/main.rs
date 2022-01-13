@@ -20,7 +20,10 @@ mod doh;
 struct Config {
     pub bind_address: Ipv6Addr,
     pub bind_port: u16,
-    pub redis_uri: String,
+    pub redis_hostname: String,
+    pub redis_username: String,
+    pub redis_password: String,
+    pub redis_port: u16,
     pub redis_retry_seconds: u64,
     pub tcp_timeout_seconds: u64,
     pub use_doh: bool,
@@ -39,7 +42,14 @@ impl Config {
             bind_port: load_env("53", "BIND_PORT", false)?
                 .parse()
                 .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("BIND_PORT".into()))?,
-            redis_uri: load_env("redis://pektin-redis:6379", "REDIS_URI", false)?,
+            redis_hostname: load_env("pektin-redis", "REDIS_HOSTNAME", false)?,
+            redis_port: load_env("6379", "REDIS_PORT", false)?
+                .parse()
+                .map_err(|_| {
+                    pektin_common::PektinCommonError::InvalidEnvVar("REDIS_PORT".into())
+                })?,
+            redis_username: load_env("r-pektin-server", "REDIS_USERNAME", false)?,
+            redis_password: load_env("", "REDIS_PASSWORD", true)?,
             redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS", false)?
                 .parse()
                 .map_err(|_| {
@@ -73,7 +83,10 @@ async fn main() -> PektinResult<()> {
     let config = Config::from_env()?;
 
     let redis_pool_conf = pektin_common::deadpool_redis::Config {
-        url: Some(config.redis_uri.clone()),
+        url: Some(format!(
+            "redis://{}:{}@{}:{}",
+            config.redis_username, config.redis_password, config.redis_hostname, config.redis_port
+        )),
         connection: None,
         pool: None,
     };

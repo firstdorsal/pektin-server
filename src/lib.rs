@@ -2,9 +2,9 @@ pub mod doh;
 pub mod persistence;
 
 use pektin_common::deadpool_redis::Pool;
-use pektin_common::get_authoritative_zones;
 use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
-use pektin_common::proto::rr::{Name, Record, RecordType};
+use pektin_common::proto::rr::{Name, RData, Record, RecordType};
+use pektin_common::{get_authoritative_zones, RedisEntry, RrSet};
 use persistence::{get_rrset, QueryResponse};
 use thiserror::Error;
 
@@ -56,6 +56,7 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Processe
         Ok(c) => c,
         Err(_) => {
             response.set_response_code(ResponseCode::ServFail);
+            eprintln!("ServFail: could not get redis connection from pool");
 
             // copy queries
             response.add_queries(message.take_queries().into_iter());
@@ -78,23 +79,22 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Processe
 
         let res = get_rrset(&mut con, q.name(), q.query_type()).await;
         if let Ok(redis_response) = res {
-            let rr_set = match redis_response {
+            let redis_entry = match redis_response {
                 QueryResponse::Empty => continue,
-                QueryResponse::Definitive(def) => def.rr_set,
-                QueryResponse::Wildcard(wild) => wild.rr_set,
-                QueryResponse::Both { definitive, .. } => definitive.rr_set,
+                QueryResponse::Definitive(def) => def,
+                QueryResponse::Wildcard(wild) => wild,
+                QueryResponse::Both { definitive, .. } => definitive,
             };
-            for record in rr_set {
-                let rdata = match record.value.convert() {
-                    Ok(r) => r,
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        response.set_response_code(ResponseCode::ServFail);
-                        break;
-                    }
-                };
-                let rr = Record::from_rdata(q.name().clone(), record.ttl, rdata);
-                response.add_answer(rr);
+            let records = match redis_entry.convert() {
+                Ok(r) => r,
+                Err(err) => {
+                    eprintln!("{}", err);
+                    response.set_response_code(ResponseCode::ServFail);
+                    break;
+                }
+            };
+            for record in records.into_iter() {
+                response.add_answer(record);
             }
             answer_stored = true;
         } else {
@@ -106,52 +106,64 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Processe
 
     if !answer_stored && (response.response_code() != ResponseCode::ServFail) {
         if let Some(queried_name) = zone_name {
-            if let Ok(authoritative_zones) = get_authoritative_zones(&mut con).await {
-                if let Some(auth_zone) = authoritative_zones
-                    .into_iter()
-                    .map(|zone| {
-                        Name::from_utf8(zone).expect("Name in redis is not a valid DNS name")
-                    })
-                    .find(|zone| zone.zone_of(queried_name))
-                {
-                    let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
-                    if let Ok(redis_response) = res {
-                        let rr_set = match redis_response {
-                            QueryResponse::Empty => {
-                                response.set_response_code(ResponseCode::Refused);
-                                vec![]
-                            }
-                            QueryResponse::Definitive(def) => def.rr_set,
-                            QueryResponse::Wildcard(wild) => wild.rr_set,
-                            QueryResponse::Both { definitive, .. } => definitive.rr_set,
-                        };
-                        for record in rr_set {
-                            // get the name of the authoritative zone, preserving the case of the queried name
-                            let mut soa_name = queried_name.clone();
-                            while soa_name.num_labels() != auth_zone.num_labels() {
-                                soa_name = soa_name.base_name();
-                            }
-                            let rdata = match record.value.convert() {
-                                Ok(r) => r,
-                                Err(err) => {
-                                    eprintln!("{}", err);
-                                    response.set_response_code(ResponseCode::ServFail);
-                                    break;
+            match get_authoritative_zones(&mut con).await {
+                Ok(authoritative_zones) => {
+                    if let Some(auth_zone) = authoritative_zones
+                        .into_iter()
+                        .map(|zone| {
+                            Name::from_utf8(zone).expect("Name in redis is not a valid DNS name")
+                        })
+                        .find(|zone| zone.zone_of(queried_name))
+                    {
+                        let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
+                        match res {
+                            Ok(redis_response) => {
+                                let redis_entry = match redis_response {
+                                    QueryResponse::Empty => {
+                                        response.set_response_code(ResponseCode::Refused);
+                                        None
+                                    }
+                                    QueryResponse::Definitive(def) => Some(def),
+                                    QueryResponse::Wildcard(wild) => Some(wild),
+                                    QueryResponse::Both { definitive, .. } => Some(definitive),
+                                };
+                                let rr_set = match redis_entry {
+                                    Some(RedisEntry {
+                                        rr_set: RrSet::SOA { rr_set },
+                                        ..
+                                    }) => rr_set,
+                                    _ => vec![],
+                                };
+                                for record in rr_set {
+                                    // get the name of the authoritative zone, preserving the case of the queried name
+                                    let mut soa_name = queried_name.clone();
+                                    while soa_name.num_labels() != auth_zone.num_labels() {
+                                        soa_name = soa_name.base_name();
+                                    }
+                                    let rr = Record::from_rdata(
+                                        soa_name,
+                                        record.ttl,
+                                        RData::SOA(record.value),
+                                    );
+                                    // the name is a bit misleading; this adds the record to the authority section
+                                    response.add_name_server(rr);
+                                    // TODO this is probably not correct (see RFC)
+                                    response.set_response_code(ResponseCode::NXDomain);
                                 }
-                            };
-                            let rr = Record::from_rdata(soa_name, record.ttl, rdata);
-                            // the name is a bit misleading; this adds the record to the authority section
-                            response.add_name_server(rr);
-                            response.set_response_code(ResponseCode::NXDomain);
+                            }
+                            Err(e) => {
+                                eprintln!("Could not get SOA record: {}", e);
+                                response.set_response_code(ResponseCode::ServFail);
+                            }
                         }
                     } else {
-                        response.set_response_code(ResponseCode::ServFail);
+                        response.set_response_code(ResponseCode::Refused);
                     }
-                } else {
-                    response.set_response_code(ResponseCode::Refused);
                 }
-            } else {
-                response.set_response_code(ResponseCode::ServFail);
+                Err(e) => {
+                    eprintln!("Could not get authoritative zones: {}", e);
+                    response.set_response_code(ResponseCode::ServFail);
+                }
             }
         } else {
             // TODO is that right?

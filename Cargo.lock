@@ -1032,7 +1032,7 @@ checksum = "0744126afe1a6dd7f394cb50a716dbe086cb06e255e53d8d0185d82828358fb5"
 [[package]]
 name = "pektin-common"
 version = "0.1.0"
-source = "git+https://github.com/pektin-dns/pektin-common?branch=main#1dc79da4f4246563267793b1377228ab89b6acb7"
+source = "git+https://github.com/pektin-dns/pektin-common?branch=main#dcd82a38ca769c4cb286ca476cc6925b3a3a143e"
 dependencies = [
  "base64",
  "deadpool-redis",

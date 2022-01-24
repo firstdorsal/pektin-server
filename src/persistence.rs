@@ -23,7 +23,7 @@ pub async fn get_rrset(
     let zone = zone.to_lowercase();
     let definitive_key = format!("{}:{}", zone, rr_type);
     let wildcard_key = format!("{}:{}", zone.clone().into_wildcard(), rr_type);
-    let res: Vec<Value> = con.get(vec![definitive_key, wildcard_key]).await?;
+    let res: Vec<Value> = con.get(vec![&definitive_key, &wildcard_key]).await?;
     if res.len() != 2 {
         return Err(PektinError::InvalidRedisData);
     }
@@ -35,20 +35,20 @@ pub async fn get_rrset(
 
     Ok(match string_res {
         (Ok(def), Ok(wild)) => QueryResponse::Both {
-            definitive: serde_json::from_str(&def)?,
-            wildcard: serde_json::from_str(&wild)?,
+            definitive: RedisEntry::deserialize_from_redis(&definitive_key, &def)?,
+            wildcard: RedisEntry::deserialize_from_redis(&wildcard_key, &wild)?,
         },
         (Ok(def), Err(_)) => {
             if !matches!(res[1], Value::Nil) {
                 return Err(PektinError::WickedRedisValue);
             }
-            QueryResponse::Definitive(serde_json::from_str(&def)?)
+            QueryResponse::Definitive(RedisEntry::deserialize_from_redis(&definitive_key, &def)?)
         }
         (Err(_), Ok(wild)) => {
             if !matches!(res[0], Value::Nil) {
                 return Err(PektinError::WickedRedisValue);
             }
-            QueryResponse::Wildcard(serde_json::from_str(&wild)?)
+            QueryResponse::Wildcard(RedisEntry::deserialize_from_redis(&wildcard_key, &wild)?)
         }
         (Err(_), Err(_)) => {
             if !matches!(res[0], Value::Nil) || !matches!(res[1], Value::Nil) {

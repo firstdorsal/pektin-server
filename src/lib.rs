@@ -3,8 +3,8 @@ pub mod persistence;
 
 use pektin_common::deadpool_redis::Pool;
 use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
-use pektin_common::proto::rr::{Name, Record, RecordType};
-use pektin_common::{get_authoritative_zones, RedisEntry};
+use pektin_common::proto::rr::{Name, RData, Record, RecordType};
+use pektin_common::{get_authoritative_zones, RedisEntry, RrSet};
 use persistence::{get_rrset, QueryResponse};
 use thiserror::Error;
 
@@ -48,6 +48,7 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
         Ok(c) => c,
         Err(_) => {
             response.set_response_code(ResponseCode::ServFail);
+            eprintln!("ServFail: could not get redis connection from pool");
 
             // copy queries
             response.add_queries(message.take_queries().into_iter());
@@ -76,7 +77,7 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
                 QueryResponse::Wildcard(wild) => wild,
                 QueryResponse::Both { definitive, .. } => definitive,
             };
-            let records: Vec<Record> = match redis_entry.try_into() {
+            let records = match redis_entry.convert() {
                 Ok(r) => r,
                 Err(err) => {
                     eprintln!("{}", err);
@@ -95,55 +96,64 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
 
     if !answer_stored && (response.response_code() != ResponseCode::ServFail) {
         if let Some(queried_name) = zone_name {
-            if let Ok(authoritative_zones) = get_authoritative_zones(&mut con).await {
-                if let Some(auth_zone) = authoritative_zones
-                    .into_iter()
-                    .map(|zone| {
-                        Name::from_utf8(zone).expect("Name in redis is not a valid DNS name")
-                    })
-                    .find(|zone| zone.zone_of(queried_name))
-                {
-                    let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
-                    if let Ok(redis_response) = res {
-                        let redis_entry: Option<RedisEntry> = match redis_response {
-                            QueryResponse::Empty => {
-                                response.set_response_code(ResponseCode::Refused);
-                                None
+            match get_authoritative_zones(&mut con).await {
+                Ok(authoritative_zones) => {
+                    if let Some(auth_zone) = authoritative_zones
+                        .into_iter()
+                        .map(|zone| {
+                            Name::from_utf8(zone).expect("Name in redis is not a valid DNS name")
+                        })
+                        .find(|zone| zone.zone_of(queried_name))
+                    {
+                        let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
+                        match res {
+                            Ok(redis_response) => {
+                                let redis_entry = match redis_response {
+                                    QueryResponse::Empty => {
+                                        response.set_response_code(ResponseCode::Refused);
+                                        None
+                                    }
+                                    QueryResponse::Definitive(def) => Some(def),
+                                    QueryResponse::Wildcard(wild) => Some(wild),
+                                    QueryResponse::Both { definitive, .. } => Some(definitive),
+                                };
+                                let rr_set = match redis_entry {
+                                    Some(RedisEntry {
+                                        rr_set: RrSet::SOA { rr_set },
+                                        ..
+                                    }) => rr_set,
+                                    _ => vec![],
+                                };
+                                for record in rr_set {
+                                    // get the name of the authoritative zone, preserving the case of the queried name
+                                    let mut soa_name = queried_name.clone();
+                                    while soa_name.num_labels() != auth_zone.num_labels() {
+                                        soa_name = soa_name.base_name();
+                                    }
+                                    let rr = Record::from_rdata(
+                                        soa_name,
+                                        record.ttl,
+                                        RData::SOA(record.value),
+                                    );
+                                    // the name is a bit misleading; this adds the record to the authority section
+                                    response.add_name_server(rr);
+                                    // TODO this is probably not correct (see RFC)
+                                    response.set_response_code(ResponseCode::NXDomain);
+                                }
                             }
-                            QueryResponse::Definitive(def) => Some(def),
-                            QueryResponse::Wildcard(wild) => Some(wild),
-                            QueryResponse::Both { definitive, .. } => Some(definitive),
-                        };
-                        if let Some(redis_entry) = redis_entry {
-                            let records: Vec<Record> = match redis_entry.try_into() {
-                                Ok(r) => r,
-                                Err(err) => {
-                                    eprintln!("{}", err);
-                                    response.set_response_code(ResponseCode::ServFail);
-                                    vec![]
-                                }
-                            };
-                            for record in records {
-                                // get the name of the authoritative zone, preserving the case of the queried name
-                                let mut soa_name = queried_name.clone();
-                                while soa_name.num_labels() != auth_zone.num_labels() {
-                                    soa_name = soa_name.base_name();
-                                }
-                                let ttl = record.ttl();
-                                let rr = Record::from_rdata(soa_name, ttl, record.into_data());
-                                // the name is a bit misleading; this adds the record to the authority section
-                                response.add_name_server(rr);
-                                response.set_response_code(ResponseCode::NXDomain);
+                            Err(e) => {
+                                eprintln!("Could not get SOA record: {}", e);
+                                response.set_response_code(ResponseCode::ServFail);
                             }
                         }
                     } else {
-                        response.set_response_code(ResponseCode::ServFail);
+                        response.set_response_code(ResponseCode::Refused);
                     }
-                } else {
-                    response.set_response_code(ResponseCode::Refused);
                 }
-            } else {
-                response.set_response_code(ResponseCode::ServFail);
+                Err(e) => {
+                    eprintln!("Could not get authoritative zones: {}", e);
+                    response.set_response_code(ResponseCode::ServFail);
+                }
             }
         } else {
             // TODO is that right?

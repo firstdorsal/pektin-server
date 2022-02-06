@@ -2,9 +2,9 @@ pub mod doh;
 pub mod persistence;
 
 use pektin_common::deadpool_redis::Pool;
-use pektin_common::get_authoritative_zones;
 use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
 use pektin_common::proto::rr::{Name, Record, RecordType};
+use pektin_common::{get_authoritative_zones, RedisEntry};
 use persistence::{get_rrset, QueryResponse};
 use thiserror::Error;
 
@@ -29,15 +29,7 @@ pub enum PektinError {
 }
 pub type PektinResult<T> = Result<T, PektinError>;
 
-#[derive(Debug)]
-pub enum ProcessedRequest {
-    /// Contains the generated response.
-    Handled(Message),
-    /// Could not handle the request (or did not want to handle it).
-    NotHandled,
-}
-
-pub async fn process_request(mut message: Message, redis_pool: Pool) -> ProcessedRequest {
+pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message {
     // TODO: better error logging (use https://git.sr.ht/~mvforell/ddc-ci/tree/master/item/src/daemon_data.rs#L90 ?)
 
     let mut response = Message::new();
@@ -59,7 +51,7 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Processe
 
             // copy queries
             response.add_queries(message.take_queries().into_iter());
-            return ProcessedRequest::Handled(response);
+            return response;
         }
     };
 
@@ -78,24 +70,21 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Processe
 
         let res = get_rrset(&mut con, q.name(), q.query_type()).await;
         if let Ok(redis_response) = res {
-            let rr_set = match redis_response {
+            let redis_entry = match redis_response {
                 QueryResponse::Empty => continue,
-                QueryResponse::Definitive(def) => def.rr_set,
-                QueryResponse::Wildcard(wild) => wild.rr_set,
-                QueryResponse::Both { definitive, .. } => definitive.rr_set,
+                QueryResponse::Definitive(def) => def,
+                QueryResponse::Wildcard(wild) => wild,
+                QueryResponse::Both { definitive, .. } => definitive,
             };
-            for record in rr_set {
-                let rdata = match record.value.convert() {
-                    Ok(r) => r,
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        response.set_response_code(ResponseCode::ServFail);
-                        break;
-                    }
-                };
-                let rr = Record::from_rdata(q.name().clone(), record.ttl, rdata);
-                response.add_answer(rr);
-            }
+            let records: Vec<Record> = match redis_entry.try_into() {
+                Ok(r) => r,
+                Err(err) => {
+                    eprintln!("{}", err);
+                    response.set_response_code(ResponseCode::ServFail);
+                    break;
+                }
+            };
+            response.add_answers(records);
             answer_stored = true;
         } else {
             eprintln!("{}", res.err().unwrap());
@@ -116,33 +105,36 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Processe
                 {
                     let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
                     if let Ok(redis_response) = res {
-                        let rr_set = match redis_response {
+                        let redis_entry: Option<RedisEntry> = match redis_response {
                             QueryResponse::Empty => {
                                 response.set_response_code(ResponseCode::Refused);
-                                vec![]
+                                None
                             }
-                            QueryResponse::Definitive(def) => def.rr_set,
-                            QueryResponse::Wildcard(wild) => wild.rr_set,
-                            QueryResponse::Both { definitive, .. } => definitive.rr_set,
+                            QueryResponse::Definitive(def) => Some(def),
+                            QueryResponse::Wildcard(wild) => Some(wild),
+                            QueryResponse::Both { definitive, .. } => Some(definitive),
                         };
-                        for record in rr_set {
-                            // get the name of the authoritative zone, preserving the case of the queried name
-                            let mut soa_name = queried_name.clone();
-                            while soa_name.num_labels() != auth_zone.num_labels() {
-                                soa_name = soa_name.base_name();
-                            }
-                            let rdata = match record.value.convert() {
+                        if let Some(redis_entry) = redis_entry {
+                            let records: Vec<Record> = match redis_entry.try_into() {
                                 Ok(r) => r,
                                 Err(err) => {
                                     eprintln!("{}", err);
                                     response.set_response_code(ResponseCode::ServFail);
-                                    break;
+                                    vec![]
                                 }
                             };
-                            let rr = Record::from_rdata(soa_name, record.ttl, rdata);
-                            // the name is a bit misleading; this adds the record to the authority section
-                            response.add_name_server(rr);
-                            response.set_response_code(ResponseCode::NXDomain);
+                            for record in records {
+                                // get the name of the authoritative zone, preserving the case of the queried name
+                                let mut soa_name = queried_name.clone();
+                                while soa_name.num_labels() != auth_zone.num_labels() {
+                                    soa_name = soa_name.base_name();
+                                }
+                                let ttl = record.ttl();
+                                let rr = Record::from_rdata(soa_name, ttl, record.into_data());
+                                // the name is a bit misleading; this adds the record to the authority section
+                                response.add_name_server(rr);
+                                response.set_response_code(ResponseCode::NXDomain);
+                            }
                         }
                     } else {
                         response.set_response_code(ResponseCode::ServFail);
@@ -162,5 +154,5 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Processe
     // copy queries
     response.add_queries(message.take_queries().into_iter());
 
-    ProcessedRequest::Handled(response)
+    response
 }

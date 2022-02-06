@@ -1,11 +1,17 @@
-use crate::{process_request, PektinResult, ProcessedRequest};
+use crate::{process_request, PektinResult};
 use actix_cors::Cors;
 use actix_web::dev::Server;
-use actix_web::{get, post, web, App, HttpResponse, HttpServer, Responder};
+use actix_web::{get, post, web, App, HttpResponse, HttpServer};
+use data_encoding::BASE64URL_NOPAD;
 use pektin_common::deadpool_redis::Pool;
 use pektin_common::proto::op::Message;
 use serde::Deserialize;
 use std::net::Ipv6Addr;
+
+#[derive(Deserialize)]
+struct GetQueries {
+    dns: String,
+}
 
 pub async fn use_doh(
     bind_address: Ipv6Addr,
@@ -29,48 +35,43 @@ pub async fn use_doh(
 }
 
 #[post("/dns-query")]
-async fn doh_post(body: web::Bytes, redis_pool: web::Data<Pool>) -> impl Responder {
-    eprintln!("uwu~");
-    let bytes: Vec<u8> = body.into_iter().collect();
-    let message = match Message::from_vec(&bytes) {
-        Ok(m) => m,
-        _ => {
-            return HttpResponse::BadRequest()
-                .content_type("application/dns-message")
-                .body("")
-        }
-    };
-
-    match process_request_doh(message, redis_pool.get_ref().clone()).await {
-        Some(bytes) => HttpResponse::Ok()
-            .content_type("application/dns-message")
-            .body(bytes),
-        None => HttpResponse::BadRequest()
-            .content_type("application/dns-message")
-            .body("Bad request"),
-    }
-}
-
-#[derive(Deserialize)]
-struct GetQueries {
-    dns: String,
+async fn doh_post(body: web::Bytes, redis_pool: web::Data<Pool>) -> HttpResponse {
+    handle_request(&body, redis_pool).await
 }
 
 #[get("/dns-query")]
-async fn doh_get(queries: web::Query<GetQueries>, _redis_pool: web::Data<Pool>) -> impl Responder {
-    eprintln!("owo~");
-    let _query_b64 = &queries.dns;
-
-    HttpResponse::Ok()
-        .content_type("application/dns-message")
-        .body("hi there")
+async fn doh_get(queries: web::Query<GetQueries>, redis_pool: web::Data<Pool>) -> HttpResponse {
+    let query_bytes = match BASE64URL_NOPAD.decode(queries.dns.as_bytes()) {
+        Ok(b) => b,
+        Err(e) => {
+            return HttpResponse::BadRequest()
+                .content_type("application/dns-message")
+                .body(format!("Invalid Base64: {e}"))
+        }
+    };
+    handle_request(&query_bytes, redis_pool).await
 }
 
-async fn process_request_doh(message: Message, redis_pool: Pool) -> Option<Vec<u8>> {
-    let processed_request = process_request(message, redis_pool).await;
-    if let ProcessedRequest::Handled(response) = processed_request {
-        response.to_vec().ok()
-    } else {
-        None
+async fn handle_request(bytes: &[u8], redis_pool: web::Data<Pool>) -> HttpResponse {
+    let message = match Message::from_vec(bytes) {
+        Ok(m) => m,
+        Err(e) => {
+            return HttpResponse::BadRequest()
+                .content_type("application/dns-message")
+                .body(format!("Invalid DNS message: {e}"))
+        }
+    };
+
+    match process_request(message, redis_pool.get_ref().clone())
+        .await
+        .to_vec()
+        .ok()
+    {
+        Some(bytes) => HttpResponse::Ok()
+            .content_type("application/dns-message")
+            .body(bytes),
+        None => HttpResponse::InternalServerError()
+            .content_type("application/dns-message")
+            .body("Could not process request"),
     }
 }

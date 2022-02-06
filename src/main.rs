@@ -8,7 +8,7 @@ use pektin_common::proto::tcp::TcpStream;
 use pektin_common::proto::udp::UdpStream;
 use pektin_common::proto::xfer::{BufDnsStreamHandle, SerialMessage};
 use pektin_common::proto::DnsStreamHandle;
-use pektin_server::{process_request, PektinResult, ProcessedRequest};
+use pektin_server::{process_request, PektinResult};
 use std::net::Ipv6Addr;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
@@ -211,10 +211,8 @@ async fn handle_request_udp_tcp(
             return;
         }
     };
-    let processed_request = process_request(message, redis_pool).await;
-    if let ProcessedRequest::Handled(response) = processed_request {
-        send_response(msg, response, stream_handle);
-    }
+    let response = process_request(message, redis_pool).await;
+    send_response(msg, response, stream_handle)
 }
 
 fn send_response(query: SerialMessage, response: Message, mut stream_handle: BufDnsStreamHandle) {

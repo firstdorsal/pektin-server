@@ -23,7 +23,26 @@ pub async fn get_rrset(
     let zone = zone.to_lowercase();
     let definitive_key = format!("{}:{}", zone, rr_type);
     let wildcard_key = format!("{}:{}", zone.clone().into_wildcard(), rr_type);
-    let res: Vec<Value> = con.get(vec![&definitive_key, &wildcard_key]).await?;
+    get_definitive_or_wildcard_records(con, &definitive_key, &wildcard_key).await
+}
+
+pub async fn get_rrsig(
+    con: &mut Connection,
+    zone: &Name,
+    rr_type: RecordType,
+) -> PektinResult<QueryResponse> {
+    let zone = zone.to_lowercase();
+    let definitive_key = format!("{}:RRSIG:{}", zone, rr_type);
+    let wildcard_key = format!("{}:RRSIG:{}", zone.clone().into_wildcard(), rr_type);
+    get_definitive_or_wildcard_records(con, &definitive_key, &wildcard_key).await
+}
+
+async fn get_definitive_or_wildcard_records(
+    con: &mut Connection,
+    definitive_key: &str,
+    wildcard_key: &str,
+) -> PektinResult<QueryResponse> {
+    let res: Vec<Value> = con.get(vec![definitive_key, wildcard_key]).await?;
     if res.len() != 2 {
         return Err(PektinError::InvalidRedisData);
     }

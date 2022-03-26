@@ -5,7 +5,7 @@ use pektin_common::deadpool_redis::Pool;
 use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
 use pektin_common::proto::rr::{Name, RData, Record, RecordType};
 use pektin_common::{get_authoritative_zones, RedisEntry, RrSet};
-use persistence::{get_rrset, QueryResponse};
+use persistence::{get_rrset, get_rrsig, QueryResponse};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -92,6 +92,32 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
             response.set_response_code(ResponseCode::ServFail);
             break;
         }
+
+        let do_flag = message.edns().map(|edns| edns.dnssec_ok()).unwrap_or(false);
+        if answer_stored && do_flag {
+            let res = get_rrsig(&mut con, q.name(), q.query_type()).await;
+            if let Ok(redis_response) = res {
+                let redis_entry = match redis_response {
+                    QueryResponse::Empty => continue,
+                    QueryResponse::Definitive(def) => def,
+                    QueryResponse::Wildcard(wild) => wild,
+                    QueryResponse::Both { definitive, .. } => definitive,
+                };
+                let records = match redis_entry.convert() {
+                    Ok(r) => r,
+                    Err(err) => {
+                        eprintln!("{}", err);
+                        response.set_response_code(ResponseCode::ServFail);
+                        break;
+                    }
+                };
+                response.add_answers(records);
+            } else {
+                eprintln!("{}", res.err().unwrap());
+                response.set_response_code(ResponseCode::ServFail);
+                break;
+            }
+        }
     }
 
     if !answer_stored && (response.response_code() != ResponseCode::ServFail) {
@@ -117,12 +143,13 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
                                     QueryResponse::Wildcard(wild) => Some(wild),
                                     QueryResponse::Both { definitive, .. } => Some(definitive),
                                 };
-                                let rr_set = match redis_entry {
+                                let (ttl, rr_set) = match redis_entry {
                                     Some(RedisEntry {
                                         rr_set: RrSet::SOA { rr_set },
+                                        ttl,
                                         ..
-                                    }) => rr_set,
-                                    _ => vec![],
+                                    }) => (ttl, rr_set),
+                                    _ => (0, vec![]),
                                 };
                                 for record in rr_set {
                                     // get the name of the authoritative zone, preserving the case of the queried name
@@ -130,11 +157,8 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
                                     while soa_name.num_labels() != auth_zone.num_labels() {
                                         soa_name = soa_name.base_name();
                                     }
-                                    let rr = Record::from_rdata(
-                                        soa_name,
-                                        record.ttl,
-                                        RData::SOA(record.value),
-                                    );
+                                    let rr =
+                                        Record::from_rdata(soa_name, ttl, RData::SOA(record.value));
                                     // the name is a bit misleading; this adds the record to the authority section
                                     response.add_name_server(rr);
                                     // TODO this is probably not correct (see RFC)

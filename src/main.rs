@@ -1,5 +1,5 @@
 use dotenv::dotenv;
-use futures_util::{future, StreamExt};
+use futures_util::StreamExt;
 use pektin_common::deadpool_redis::Pool;
 use pektin_common::load_env;
 use pektin_common::proto::iocompat::AsyncIoTokioAsStd;
@@ -12,6 +12,7 @@ use pektin_server::{process_request, PektinResult};
 use std::net::Ipv6Addr;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
+use tokio::signal::unix::{signal, SignalKind};
 use trust_dns_server::server::TimeoutStream;
 
 mod doh;
@@ -126,22 +127,29 @@ async fn main() -> PektinResult<()> {
         message_loop_tcp(tcp_listener, tcp_redis_pool).await;
     });
 
+    // shutdown if we receive a SIGINT (Ctrl+C) or SIGTERM (sent by docker on shutdown)
+    let mut sigint = signal(SignalKind::interrupt())?;
+    let mut sigterm = signal(SignalKind::terminate())?;
     match doh_server {
         Some(server) => {
-            let (res1, res2, res3) = future::join3(udp_join_handle, tcp_join_handle, server).await;
-            if res1.is_err() || res2.is_err() || res3.is_err() {
-                eprintln!("Internal error in tokio spawn")
+            tokio::select! {
+                _ = udp_join_handle => Ok(()),
+                _ = tcp_join_handle => Ok(()),
+                res = server => res.map_err(Into::into),
+                _ = sigint.recv() => Ok(()),
+                _ = sigterm.recv() => Ok(()),
             }
         }
         None => {
-            let (res1, res2) = future::join(udp_join_handle, tcp_join_handle).await;
-            if res1.is_err() || res2.is_err() {
-                eprintln!("Internal error in tokio spawn")
-            }
+            tokio::select! {
+                _ = udp_join_handle => (),
+                _ = tcp_join_handle => (),
+                _ = sigint.recv() => (),
+                _ = sigterm.recv() => (),
+            };
+            Ok(())
         }
     }
-
-    Ok(())
 }
 
 async fn message_loop_udp(socket: UdpSocket, redis_pool: Pool) {

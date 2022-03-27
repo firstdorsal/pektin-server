@@ -31,8 +31,6 @@ pub async fn use_doh(
             .service(doh_get)
     })
     .bind((bind_address, bind_port))?
-    // this prevents actix from messing with signal handling (which stops Ctrl+C from working)
-    .disable_signals()
     .run())
 }
 

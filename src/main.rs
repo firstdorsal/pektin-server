@@ -78,6 +78,7 @@ impl Config {
 #[tokio::main]
 async fn main() -> PektinResult<()> {
     dotenv().ok();
+    env_logger::init();
 
     println!("Started Pektin with these globals:");
     let config = Config::from_env()?;

@@ -4,10 +4,11 @@ name = "pektin-server"
 version = "0.1.0"
 
 [dependencies]
-actix-cors = "0.6.0-beta.8"
-actix-web = "4.0.0-rc.2"
+actix-cors = "0.6"
+actix-web = "4.0"
 data-encoding = "2.3"
 dotenv = "0.15"
+env_logger = "0.9"
 futures-util = "0.3"
 parking_lot = "0.12"
 pektin-common = { git = "https://github.com/pektin-dns/pektin-common", branch = "main" }
@@ -15,8 +16,8 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 thiserror = "1.0"
 tokio = { version = "1.12", features = ["full"] }
-trust-dns-server = "0.20.3"
-url = { version = "2.1.0", features = ["serde"] }
+trust-dns-server = "0.21"
+url = { version = "2.2", features = ["serde"] }
 
 [lib]
 name = "pektin_server"

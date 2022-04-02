@@ -23,9 +23,16 @@ name = "pektin_server"
 path = "src/lib.rs"
 
 [[bin]]
-name = "pektin_server"
+name = "main"
 path = "src/main.rs"
 
-[[bin]]
-name = "json_test"
-path = "src/json_test.rs"
+
+
+[profile.release]
+codegen-units = 1
+debug = false
+debug-assertions = false
+lto = true
+opt-level = 3
+panic = "abort"
+rpath = false

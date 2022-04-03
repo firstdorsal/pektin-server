@@ -6,10 +6,11 @@ version = "0.1.0"
 [dependencies]
 actix-cors = "0.6"
 actix-web = "4.0"
+chrono = "0.4"
 data-encoding = "2.3"
-dotenv = "0.15"
 env_logger = "0.9"
 futures-util = "0.3"
+log = { version = "0.4", features = ["release_max_level_warn"] }
 parking_lot = "0.12"
 pektin-common = { git = "https://github.com/pektin-dns/pektin-common", branch = "main" }
 serde = { version = "1.0", features = ["derive"] }

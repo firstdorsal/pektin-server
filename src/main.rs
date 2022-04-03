@@ -1,6 +1,5 @@
-use dotenv::dotenv;
 use futures_util::StreamExt;
-use pektin_common::deadpool_redis::Pool;
+use pektin_common::deadpool_redis::{self, Pool};
 use pektin_common::load_env;
 use pektin_common::proto::iocompat::AsyncIoTokioAsStd;
 use pektin_common::proto::op::Message;
@@ -9,6 +8,7 @@ use pektin_common::proto::udp::UdpStream;
 use pektin_common::proto::xfer::{BufDnsStreamHandle, SerialMessage};
 use pektin_common::proto::DnsStreamHandle;
 use pektin_server::{process_request, PektinResult};
+use std::io::Write;
 use std::net::Ipv6Addr;
 use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
@@ -78,13 +78,24 @@ impl Config {
 
 #[tokio::main]
 async fn main() -> PektinResult<()> {
-    dotenv().ok();
-    env_logger::init();
+    env_logger::builder()
+        .format(|buf, record| {
+            let ts = chrono::Local::now().format("%d.%m.%y %H:%M:%S");
+            writeln!(
+                buf,
+                "[{} {} {}]\n{}\n",
+                ts,
+                record.level(),
+                record.target(),
+                record.args()
+            )
+        })
+        .init();
 
     println!("Started Pektin with these globals:");
     let config = Config::from_env()?;
 
-    let redis_pool_conf = pektin_common::deadpool_redis::Config {
+    let redis_pool_conf = deadpool_redis::Config {
         url: Some(format!(
             "redis://{}:{}@{}:{}",
             config.redis_username, config.redis_password, config.redis_hostname, config.redis_port
@@ -92,7 +103,7 @@ async fn main() -> PektinResult<()> {
         connection: None,
         pool: None,
     };
-    let redis_pool = redis_pool_conf.create_pool()?;
+    let redis_pool = redis_pool_conf.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
 
     let doh_redis_pool = redis_pool.clone();
     let doh_server = if config.use_doh {

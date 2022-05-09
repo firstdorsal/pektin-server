@@ -36,5 +36,4 @@ debug = false
 debug-assertions = false
 lto = true
 opt-level = 3
-panic = "abort"
 rpath = false

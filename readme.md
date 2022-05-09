@@ -1,3 +1,7 @@
+keyTag ,algorithm, flag, digest, pubKey
+36131, 13/ECDSAP256SHA256, 257/KSK, sha256, pubKey
+show info in UI
+
 ```json
 {
     "rr_type": "A",
@@ -68,4 +72,4 @@ dnssec signing workflow:
 -   this gives us a TBS struct, which can be converted to a byte slice
 -   send these bytes to the vault for signing
 -   update the signature in the rrsig record from the first step
--   serialize the rrsig to json and store in redis
+-   serialize the rrsig to json and store in db

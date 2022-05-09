@@ -2,15 +2,15 @@ use crate::{PektinError, PektinResult};
 use pektin_common::deadpool_redis::redis::aio::Connection;
 use pektin_common::deadpool_redis::redis::{AsyncCommands, FromRedisValue, Value};
 use pektin_common::proto::rr::{Name, RecordType};
-use pektin_common::RedisEntry;
+use pektin_common::DbEntry;
 
 pub enum QueryResponse {
     Empty,
-    Definitive(RedisEntry),
-    Wildcard(RedisEntry),
+    Definitive(DbEntry),
+    Wildcard(DbEntry),
     Both {
-        definitive: RedisEntry,
-        wildcard: RedisEntry,
+        definitive: DbEntry,
+        wildcard: DbEntry,
     },
 }
 
@@ -44,7 +44,7 @@ async fn get_definitive_or_wildcard_records(
 ) -> PektinResult<QueryResponse> {
     let res: Vec<Value> = con.get(vec![definitive_key, wildcard_key]).await?;
     if res.len() != 2 {
-        return Err(PektinError::InvalidRedisData);
+        return Err(PektinError::InvalidDbData);
     }
 
     let string_res = (
@@ -54,24 +54,24 @@ async fn get_definitive_or_wildcard_records(
 
     Ok(match string_res {
         (Ok(def), Ok(wild)) => QueryResponse::Both {
-            definitive: RedisEntry::deserialize_from_redis(&definitive_key, &def)?,
-            wildcard: RedisEntry::deserialize_from_redis(&wildcard_key, &wild)?,
+            definitive: DbEntry::deserialize_from_db(&definitive_key, &def)?,
+            wildcard: DbEntry::deserialize_from_db(&wildcard_key, &wild)?,
         },
         (Ok(def), Err(_)) => {
             if !matches!(res[1], Value::Nil) {
-                return Err(PektinError::WickedRedisValue);
+                return Err(PektinError::WickedDbValue);
             }
-            QueryResponse::Definitive(RedisEntry::deserialize_from_redis(&definitive_key, &def)?)
+            QueryResponse::Definitive(DbEntry::deserialize_from_db(&definitive_key, &def)?)
         }
         (Err(_), Ok(wild)) => {
             if !matches!(res[0], Value::Nil) {
-                return Err(PektinError::WickedRedisValue);
+                return Err(PektinError::WickedDbValue);
             }
-            QueryResponse::Wildcard(RedisEntry::deserialize_from_redis(&wildcard_key, &wild)?)
+            QueryResponse::Wildcard(DbEntry::deserialize_from_db(&wildcard_key, &wild)?)
         }
         (Err(_), Err(_)) => {
             if !matches!(res[0], Value::Nil) || !matches!(res[1], Value::Nil) {
-                return Err(PektinError::WickedRedisValue);
+                return Err(PektinError::WickedDbValue);
             }
             QueryResponse::Empty
         }

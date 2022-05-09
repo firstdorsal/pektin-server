@@ -21,11 +21,11 @@ mod doh;
 struct Config {
     pub bind_address: Ipv6Addr,
     pub bind_port: u16,
-    pub redis_hostname: String,
-    pub redis_username: String,
-    pub redis_password: String,
-    pub redis_port: u16,
-    pub redis_retry_seconds: u64,
+    pub db_hostname: String,
+    pub db_username: String,
+    pub db_password: String,
+    pub db_port: u16,
+    pub db_retry_seconds: u64,
     pub tcp_timeout_seconds: u64,
     pub use_doh: bool,
     pub doh_bind_address: Ipv6Addr,
@@ -43,18 +43,16 @@ impl Config {
             bind_port: load_env("53", "BIND_PORT", false)?
                 .parse()
                 .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("BIND_PORT".into()))?,
-            redis_hostname: load_env("pektin-redis", "REDIS_HOSTNAME", false)?,
-            redis_port: load_env("6379", "REDIS_PORT", false)?
+            db_hostname: load_env("pektin-db", "DB_HOSTNAME", false)?,
+            db_port: load_env("6379", "DB_PORT", false)?
+                .parse()
+                .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("DB_PORT".into()))?,
+            db_username: load_env("r-pektin-server", "DB_USERNAME", false)?,
+            db_password: load_env("", "DB_PASSWORD", true)?,
+            db_retry_seconds: load_env("1", "DB_RETRY_SECONDS", false)?
                 .parse()
                 .map_err(|_| {
-                    pektin_common::PektinCommonError::InvalidEnvVar("REDIS_PORT".into())
-                })?,
-            redis_username: load_env("r-pektin-server", "REDIS_USERNAME", false)?,
-            redis_password: load_env("", "REDIS_PASSWORD", true)?,
-            redis_retry_seconds: load_env("1", "REDIS_RETRY_SECONDS", false)?
-                .parse()
-                .map_err(|_| {
-                    pektin_common::PektinCommonError::InvalidEnvVar("REDIS_RETRY_SECONDS".into())
+                    pektin_common::PektinCommonError::InvalidEnvVar("DB_RETRY_SECONDS".into())
                 })?,
             tcp_timeout_seconds: load_env("3", "TCP_TIMEOUT_SECONDS", false)?
                 .parse()
@@ -95,22 +93,34 @@ async fn main() -> PektinResult<()> {
     println!("Started Pektin with these globals:");
     let config = Config::from_env()?;
 
-    let redis_pool_conf = deadpool_redis::Config {
+    let db_pool_conf = deadpool_redis::Config {
         url: Some(format!(
-            "redis://{}:{}@{}:{}",
-            config.redis_username, config.redis_password, config.redis_hostname, config.redis_port
+            "redis://{}:{}@{}:{}/0",
+            config.db_username, config.db_password, config.db_hostname, config.db_port
         )),
         connection: None,
         pool: None,
     };
-    let redis_pool = redis_pool_conf.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+    let db_pool = db_pool_conf.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
 
-    let doh_redis_pool = redis_pool.clone();
+    let db_pool_dnssec_conf = deadpool_redis::Config {
+        url: Some(format!(
+            "redis://{}:{}@{}:{}/1",
+            config.db_username, config.db_password, config.db_hostname, config.db_port
+        )),
+        connection: None,
+        pool: None,
+    };
+    let db_pool_dnssec = db_pool_dnssec_conf.create_pool(Some(deadpool_redis::Runtime::Tokio1))?;
+
+    let doh_db_pool = db_pool.clone();
+    let doh_db_pool_dnssec = db_pool_dnssec.clone();
     let doh_server = if config.use_doh {
         match doh::use_doh(
             config.doh_bind_address,
             config.doh_bind_port,
-            doh_redis_pool,
+            doh_db_pool,
+            doh_db_pool_dnssec,
         )
         .await
         {
@@ -124,18 +134,20 @@ async fn main() -> PektinResult<()> {
         None
     };
 
-    let udp_redis_pool = redis_pool.clone();
+    let udp_db_pool = db_pool.clone();
+    let udp_db_pool_dnssec = db_pool_dnssec.clone();
     let udp_socket =
         UdpSocket::bind(format!("[{}]:{}", &config.bind_address, config.bind_port)).await?;
     let udp_join_handle = tokio::spawn(async move {
-        message_loop_udp(udp_socket, udp_redis_pool).await;
+        message_loop_udp(udp_socket, udp_db_pool, udp_db_pool_dnssec).await;
     });
 
-    let tcp_redis_pool = redis_pool.clone();
+    let tcp_db_pool = db_pool.clone();
+    let tcp_db_pool_dnssec = db_pool_dnssec.clone();
     let tcp_listener =
         TcpListener::bind(format!("[{}]:{}", &config.bind_address, config.bind_port)).await?;
     let tcp_join_handle = tokio::spawn(async move {
-        message_loop_tcp(tcp_listener, tcp_redis_pool).await;
+        message_loop_tcp(tcp_listener, tcp_db_pool, tcp_db_pool_dnssec).await;
     });
 
     // shutdown if we receive a SIGINT (Ctrl+C) or SIGTERM (sent by docker on shutdown)
@@ -163,7 +175,7 @@ async fn main() -> PektinResult<()> {
     }
 }
 
-async fn message_loop_udp(socket: UdpSocket, redis_pool: Pool) {
+async fn message_loop_udp(socket: UdpSocket, db_pool: Pool, db_pool_dnssec: Pool) {
     // see trust_dns_server::server::ServerFuture::register_socket
     let (mut udp_stream, udp_handle) =
         UdpStream::with_bound(socket, ([127, 255, 255, 254], 0).into());
@@ -178,14 +190,15 @@ async fn message_loop_udp(socket: UdpSocket, redis_pool: Pool) {
 
         let src_addr = message.addr();
         let udp_handle = udp_handle.with_remote_addr(src_addr);
-        let req_redis_pool = redis_pool.clone();
+        let req_db_pool = db_pool.clone();
+        let req_db_pool_dnssec = db_pool_dnssec.clone();
         tokio::spawn(async move {
-            handle_request_udp_tcp(message, udp_handle, req_redis_pool).await;
+            handle_request_udp_tcp(message, udp_handle, req_db_pool, req_db_pool_dnssec).await;
         });
     }
 }
 
-async fn message_loop_tcp(listener: TcpListener, redis_pool: Pool) {
+async fn message_loop_tcp(listener: TcpListener, db_pool: Pool, db_pool_dnssec: Pool) {
     // see trust_dns_server::server::ServerFuture::register_listener
     loop {
         let tcp_stream = match listener.accept().await {
@@ -196,7 +209,8 @@ async fn message_loop_tcp(listener: TcpListener, redis_pool: Pool) {
             }
         };
 
-        let req_redis_pool = redis_pool.clone();
+        let req_db_pool = db_pool.clone();
+        let req_db_pool_dnssec = db_pool_dnssec.clone();
         tokio::spawn(async move {
             let src_addr = tcp_stream.peer_addr().unwrap();
             let (tcp_stream, tcp_handle) =
@@ -213,7 +227,13 @@ async fn message_loop_tcp(listener: TcpListener, redis_pool: Pool) {
                     }
                 };
 
-                handle_request_udp_tcp(message, tcp_handle.clone(), req_redis_pool.clone()).await;
+                handle_request_udp_tcp(
+                    message,
+                    tcp_handle.clone(),
+                    req_db_pool.clone(),
+                    req_db_pool_dnssec.clone(),
+                )
+                .await;
             }
         });
     }
@@ -222,7 +242,8 @@ async fn message_loop_tcp(listener: TcpListener, redis_pool: Pool) {
 async fn handle_request_udp_tcp(
     msg: SerialMessage,
     stream_handle: BufDnsStreamHandle,
-    redis_pool: Pool,
+    db_pool: Pool,
+    db_pool_dnssec: Pool,
 ) {
     let message = match msg.to_message() {
         Ok(m) => m,
@@ -231,7 +252,7 @@ async fn handle_request_udp_tcp(
             return;
         }
     };
-    let response = process_request(message, redis_pool).await;
+    let response = process_request(message, db_pool, db_pool_dnssec).await;
     send_response(msg, response, stream_handle)
 }
 

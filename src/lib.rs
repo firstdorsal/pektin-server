@@ -4,7 +4,7 @@ pub mod persistence;
 use pektin_common::deadpool_redis::Pool;
 use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
 use pektin_common::proto::rr::{Name, RData, Record, RecordType};
-use pektin_common::{get_authoritative_zones, RedisEntry, RrSet};
+use pektin_common::{get_authoritative_zones, DbEntry, RrSet};
 use persistence::{get_rrset, get_rrsig, QueryResponse};
 use thiserror::Error;
 
@@ -12,9 +12,9 @@ use thiserror::Error;
 pub enum PektinError {
     #[error("{0}")]
     CommonError(#[from] pektin_common::PektinCommonError),
-    #[error("redis error")]
-    RedisError(#[from] pektin_common::deadpool_redis::redis::RedisError),
-    #[error("could not create redis connection pool: `{0}`")]
+    #[error("db error")]
+    DbError(#[from] pektin_common::deadpool_redis::redis::RedisError),
+    #[error("could not create db connection pool: `{0}`")]
     PoolError(#[from] pektin_common::deadpool_redis::CreatePoolError),
     #[error("io error: `{0}`")]
     IoError(#[from] std::io::Error),
@@ -22,14 +22,14 @@ pub enum PektinError {
     JsonError(#[from] serde_json::Error),
     #[error("invalid DNS data")]
     ProtoError(#[from] pektin_common::proto::error::ProtoError),
-    #[error("data in redis invalid")]
-    InvalidRedisData,
-    #[error("requested redis key had an unexpected type")]
-    WickedRedisValue,
+    #[error("data in db invalid")]
+    InvalidDbData,
+    #[error("requested db key had an unexpected type")]
+    WickedDbValue,
 }
 pub type PektinResult<T> = Result<T, PektinError>;
 
-pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message {
+pub async fn process_request(mut message: Message, db_pool: Pool, db_pool_dnssec: Pool) -> Message {
     // TODO: better error logging (use https://git.sr.ht/~mvforell/ddc-ci/tree/master/item/src/daemon_data.rs#L90 ?)
 
     let mut response = Message::new();
@@ -44,11 +44,11 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
     edns.set_max_payload(4096);
     response.set_edns(edns);
 
-    let mut con = match redis_pool.get().await {
+    let mut con = match db_pool.get().await {
         Ok(c) => c,
         Err(_) => {
             response.set_response_code(ResponseCode::ServFail);
-            eprintln!("ServFail: could not get redis connection from pool");
+            eprintln!("ServFail: could not get db connection from pool");
 
             // copy queries
             response.add_queries(message.take_queries().into_iter());
@@ -70,14 +70,14 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
         }
 
         let res = get_rrset(&mut con, q.name(), q.query_type()).await;
-        if let Ok(redis_response) = res {
-            let redis_entry = match redis_response {
+        if let Ok(db_response) = res {
+            let db_entry = match db_response {
                 QueryResponse::Empty => continue,
                 QueryResponse::Definitive(def) => def,
                 QueryResponse::Wildcard(wild) => wild,
                 QueryResponse::Both { definitive, .. } => definitive,
             };
-            let records = match redis_entry.convert() {
+            let records = match db_entry.convert() {
                 Ok(r) => r,
                 Err(err) => {
                     eprintln!("{}", err);
@@ -95,15 +95,27 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
 
         let do_flag = message.edns().map(|edns| edns.dnssec_ok()).unwrap_or(false);
         if answer_stored && do_flag {
-            let res = get_rrsig(&mut con, q.name(), q.query_type()).await;
-            if let Ok(redis_response) = res {
-                let redis_entry = match redis_response {
+            let mut dnssec_con = match db_pool_dnssec.get().await {
+                Ok(c) => c,
+                Err(_) => {
+                    response.set_response_code(ResponseCode::ServFail);
+                    eprintln!("ServFail: could not get db dnssec connection from pool");
+
+                    // copy queries
+                    response.add_queries(message.take_queries().into_iter());
+                    return response;
+                }
+            };
+
+            let res = get_rrsig(&mut dnssec_con, q.name(), q.query_type()).await;
+            if let Ok(db_response) = res {
+                let db_entry = match db_response {
                     QueryResponse::Empty => continue,
                     QueryResponse::Definitive(def) => def,
                     QueryResponse::Wildcard(wild) => wild,
                     QueryResponse::Both { definitive, .. } => definitive,
                 };
-                let records = match redis_entry.convert() {
+                let records = match db_entry.convert() {
                     Ok(r) => r,
                     Err(err) => {
                         eprintln!("{}", err);
@@ -124,17 +136,31 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
         if let Some(queried_name) = zone_name {
             match get_authoritative_zones(&mut con).await {
                 Ok(authoritative_zones) => {
-                    if let Some(auth_zone) = authoritative_zones
+                    fn find_authoritative_zone(
+                        name: &Name,
+                        authoritative_zones: &[Name],
+                    ) -> Option<Name> {
+                        let mut authoritative_zones = authoritative_zones.to_owned();
+                        // the - makes it sort the zones with the most labels first
+                        authoritative_zones.sort_by_key(|zone| -(zone.num_labels() as i16));
+                        authoritative_zones
+                            .into_iter()
+                            .find(|zone| zone.zone_of(name))
+                    }
+
+                    let authoritative_zones: Vec<_> = authoritative_zones
                         .into_iter()
                         .map(|zone| {
-                            Name::from_utf8(zone).expect("Name in redis is not a valid DNS name")
+                            Name::from_utf8(zone).expect("Name in db is not a valid DNS name")
                         })
-                        .find(|zone| zone.zone_of(queried_name))
+                        .collect();
+                    if let Some(auth_zone) =
+                        find_authoritative_zone(queried_name, &authoritative_zones)
                     {
                         let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
                         match res {
-                            Ok(redis_response) => {
-                                let redis_entry = match redis_response {
+                            Ok(db_response) => {
+                                let db_entry = match db_response {
                                     QueryResponse::Empty => {
                                         response.set_response_code(ResponseCode::Refused);
                                         None
@@ -143,8 +169,8 @@ pub async fn process_request(mut message: Message, redis_pool: Pool) -> Message 
                                     QueryResponse::Wildcard(wild) => Some(wild),
                                     QueryResponse::Both { definitive, .. } => Some(definitive),
                                 };
-                                let (ttl, rr_set) = match redis_entry {
-                                    Some(RedisEntry {
+                                let (ttl, rr_set) = match db_entry {
+                                    Some(DbEntry {
                                         rr_set: RrSet::SOA { rr_set },
                                         ttl,
                                         ..

@@ -47,7 +47,7 @@ impl Config {
             db_port: load_env("6379", "DB_PORT", false)?
                 .parse()
                 .map_err(|_| pektin_common::PektinCommonError::InvalidEnvVar("DB_PORT".into()))?,
-            db_username: load_env("r-pektin-server", "DB_USERNAME", false)?,
+            db_username: load_env("db-pektin-server", "DB_USERNAME", false)?,
             db_password: load_env("", "DB_PASSWORD", true)?,
             db_retry_seconds: load_env("1", "DB_RETRY_SECONDS", false)?
                 .parse()

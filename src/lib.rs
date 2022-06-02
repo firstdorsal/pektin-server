@@ -187,8 +187,6 @@ pub async fn process_request(mut message: Message, db_pool: Pool, db_pool_dnssec
                                         Record::from_rdata(soa_name, ttl, RData::SOA(record.value));
                                     // the name is a bit misleading; this adds the record to the authority section
                                     response.add_name_server(rr);
-                                    // TODO this is probably not correct (see RFC)
-                                    response.set_response_code(ResponseCode::NXDomain);
                                 }
                             }
                             Err(e) => {

@@ -157,6 +157,8 @@ pub async fn process_request(mut message: Message, db_pool: Pool, db_pool_dnssec
                     if let Some(auth_zone) =
                         find_authoritative_zone(queried_name, &authoritative_zones)
                     {
+                        // TODO: also include the RRSIG record for the SOA record
+                        // TODO: generate NSEC3 record and include it as well as its RRSIG record
                         let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
                         match res {
                             Ok(db_response) => {

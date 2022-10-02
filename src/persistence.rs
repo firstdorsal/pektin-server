@@ -1,8 +1,9 @@
-use crate::{PektinError, PektinResult};
 use pektin_common::deadpool_redis::redis::aio::Connection;
 use pektin_common::deadpool_redis::redis::{AsyncCommands, FromRedisValue, Value};
 use pektin_common::proto::rr::{Name, RecordType};
 use pektin_common::DbEntry;
+
+use crate::{PektinError, PektinResult};
 
 pub enum QueryResponse {
     Empty,

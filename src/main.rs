@@ -1,4 +1,11 @@
+mod doh;
+
+use std::io::Write;
+use std::net::Ipv6Addr;
+use std::time::Duration;
+
 use futures_util::StreamExt;
+use log::{error, warn};
 use pektin_common::deadpool_redis::{self, Pool};
 use pektin_common::load_env;
 use pektin_common::proto::iocompat::AsyncIoTokioAsStd;
@@ -8,14 +15,9 @@ use pektin_common::proto::udp::UdpStream;
 use pektin_common::proto::xfer::{BufDnsStreamHandle, SerialMessage};
 use pektin_common::proto::DnsStreamHandle;
 use pektin_server::{process_request, PektinResult};
-use std::io::Write;
-use std::net::Ipv6Addr;
-use std::time::Duration;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::signal::unix::{signal, SignalKind};
 use trust_dns_server::server::TimeoutStream;
-
-mod doh;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Config {
@@ -59,7 +61,7 @@ impl Config {
                 .map_err(|_| {
                     pektin_common::PektinCommonError::InvalidEnvVar("TCP_TIMEOUT_SECONDS".into())
                 })?,
-            use_doh: load_env("true", "USE_DOH", false).unwrap() == "true",
+            use_doh: load_env("true", "USE_DOH", false)? == "true",
             doh_bind_port: load_env("80", "DOH_BIND_PORT", false)?
                 .parse()
                 .map_err(|_| {
@@ -126,7 +128,7 @@ async fn main() -> PektinResult<()> {
         {
             Ok(server) => Some(server),
             Err(e) => {
-                eprintln!("Error while trying to start DOH server: {}", e);
+                error!("Error while trying to start DOH server: {}", e);
                 None
             }
         }
@@ -183,7 +185,7 @@ async fn message_loop_udp(socket: UdpSocket, db_pool: Pool, db_pool_dnssec: Pool
         let message = match message {
             Ok(m) => m,
             Err(e) => {
-                eprintln!("Error receiving UDP message: {}", e);
+                warn!("Error receiving UDP message: {}", e);
                 continue;
             }
         };
@@ -204,7 +206,7 @@ async fn message_loop_tcp(listener: TcpListener, db_pool: Pool, db_pool_dnssec: 
         let tcp_stream = match listener.accept().await {
             Ok((t, _)) => t,
             Err(e) => {
-                eprintln!("Error creating a new TCP stream: {}", e);
+                warn!("Error creating a new TCP stream: {}", e);
                 continue;
             }
         };
@@ -212,7 +214,14 @@ async fn message_loop_tcp(listener: TcpListener, db_pool: Pool, db_pool_dnssec: 
         let req_db_pool = db_pool.clone();
         let req_db_pool_dnssec = db_pool_dnssec.clone();
         tokio::spawn(async move {
-            let src_addr = tcp_stream.peer_addr().unwrap();
+            let src_addr = match tcp_stream.peer_addr() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    warn!("Could not get peer address for TCP stream: {}", e);
+                    return;
+                }
+            };
+
             let (tcp_stream, tcp_handle) =
                 TcpStream::from_stream(AsyncIoTokioAsStd(tcp_stream), src_addr);
             // TODO maybe make this configurable via environment variable?
@@ -222,7 +231,7 @@ async fn message_loop_tcp(listener: TcpListener, db_pool: Pool, db_pool_dnssec: 
                 let message = match message {
                     Ok(m) => m,
                     Err(e) => {
-                        eprintln!("Error receiving TCP message: {}", e);
+                        warn!("Error receiving TCP message: {}", e);
                         return;
                     }
                 };
@@ -248,7 +257,7 @@ async fn handle_request_udp_tcp(
     let message = match msg.to_message() {
         Ok(m) => m,
         _ => {
-            eprintln!("Could not deserialize received message");
+            warn!("Could not deserialize received message");
             return;
         }
     };
@@ -260,12 +269,12 @@ fn send_response(query: SerialMessage, response: Message, mut stream_handle: Buf
     let response_bytes = match response.to_vec() {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("Could not serialize response: {}", e);
+            error!("Could not serialize response: {}", e);
             return;
         }
     };
     let serialized_response = SerialMessage::new(response_bytes, query.addr());
     if let Err(e) = stream_handle.send(serialized_response) {
-        eprintln!("Could not send response: {}", e);
+        warn!("Could not send response: {}", e);
     }
 }

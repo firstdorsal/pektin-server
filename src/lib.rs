@@ -1,8 +1,12 @@
 pub mod doh;
 pub mod persistence;
 
+use anyhow::{anyhow, bail, Context};
+use futures_util::join;
+use log::{error, info};
+use pektin_common::deadpool_redis::redis::aio::Connection;
 use pektin_common::deadpool_redis::Pool;
-use pektin_common::proto::op::{Edns, Message, MessageType, ResponseCode};
+use pektin_common::proto::op::{Edns, Message, MessageType, Query, ResponseCode};
 use pektin_common::proto::rr::{Name, RData, Record, RecordType};
 use pektin_common::{get_authoritative_zones, DbEntry, RrSet};
 use persistence::{get_rrset, get_rrsig, QueryResponse};
@@ -26,12 +30,13 @@ pub enum PektinError {
     InvalidDbData,
     #[error("requested db key had an unexpected type")]
     WickedDbValue,
+    #[error("This is a bug, please report it: {0}")]
+    Bug(&'static str),
 }
 pub type PektinResult<T> = Result<T, PektinError>;
 
+/// Takes the given query message, processes it, and returns an appropriate response message.
 pub async fn process_request(mut message: Message, db_pool: Pool, db_pool_dnssec: Pool) -> Message {
-    // TODO: better error logging (use https://git.sr.ht/~mvforell/ddc-ci/tree/master/item/src/daemon_data.rs#L90 ?)
-
     let mut response = Message::new();
     response.set_id(message.id());
     response.set_message_type(MessageType::Response);
@@ -40,179 +45,171 @@ pub async fn process_request(mut message: Message, db_pool: Pool, db_pool_dnssec
     response.set_recursion_available(false);
     response.set_authoritative(true);
 
-    let mut edns = Edns::new();
-    edns.set_max_payload(4096);
-    response.set_edns(edns);
+    // only add EDNS to the response if it's present in the query message
+    if message.edns().is_some() {
+        let mut edns = Edns::new();
+        // TODO: think about payload size (see https://www.rfc-editor.org/rfc/rfc6891#section-6.2.5)
+        edns.set_max_payload(4096);
+        response.set_edns(edns);
+    }
 
-    let mut con = match db_pool.get().await {
-        Ok(c) => c,
-        Err(_) => {
-            response.set_response_code(ResponseCode::ServFail);
-            eprintln!("ServFail: could not get db connection from pool");
+    if let Err(e) = process_request_internal(&mut response, &message, db_pool, db_pool_dnssec).await
+    {
+        error!("ServFail: {}", e);
+        response.set_response_code(ResponseCode::ServFail);
+    }
 
-            // copy queries
-            response.add_queries(message.take_queries().into_iter());
-            return response;
+    // echo back the query section in the response
+    response.add_queries(message.take_queries().into_iter());
+
+    response
+}
+
+/// Does most of the work for process_request(), but is allowed to return an error.
+///
+/// This error is logged in process_request(), and then a SERVFAIL response is returned.
+async fn process_request_internal(
+    response: &mut Message,
+    message: &Message,
+    db_pool: Pool,
+    db_pool_dnssec: Pool,
+) -> anyhow::Result<()> {
+    if !validate_query_message(message) {
+        info!("Received invalid message");
+        response.set_response_code(ResponseCode::FormErr);
+        return Ok(());
+    }
+
+    let (mut con, mut dnssec_con) = match join!(db_pool.get(), db_pool_dnssec.get()) {
+        (Ok(c), Ok(db_c)) => (c, db_c),
+        _ => {
+            bail!("could not get db and dnssec db connection from pool");
         }
     };
 
     // TODO: check how to handle wildcards according to the relevant RFCs
     // (does a.b.example.com match *.example.com?)
 
-    // needed later for querying the SOA record if no query could be answered
-    let mut zone_name = None;
-    // keep track if we added an answer into the message (response.answer_count() doesn't automatically update)
-    let mut answer_stored = false;
+    // validate_query_message() checks that there is exactly one query
+    let query = message.queries().get(0).ok_or_else(|| {
+        anyhow!("no query in message - validate_query_message() should have prevented this")
+    })?;
 
-    for q in message.queries() {
-        if zone_name.is_none() {
-            zone_name = Some(q.name());
+    // try to find a matching answer (wildcard allowed).
+    // keep track if we added an answer into the message (response.answer_count() doesn't
+    // automatically update)
+    let answer_stored = try_find_and_add_answer(response, query, get_rrset, &mut con).await?;
+
+    // if we found a matching answer and the DO flag is set, try to get the matching RRSIG entries
+    let do_flag = message.edns().map(|edns| edns.dnssec_ok()).unwrap_or(false);
+    if answer_stored && do_flag {
+        try_find_and_add_answer(response, query, get_rrsig, &mut dnssec_con).await?;
+    }
+
+    // we haven't found a matching answer, therefore try to find the SOA record for the query's zone
+    // and respond with that instead
+    if !answer_stored {
+        let authoritative_zones = get_authoritative_zones(&mut con)
+            .await
+            .context("Could not get authoritative zones")?;
+
+        fn find_authoritative_zone(name: &Name, authoritative_zones: &[Name]) -> Option<Name> {
+            let mut authoritative_zones = authoritative_zones.to_owned();
+            // the - makes it sort the zones with the most labels first
+            authoritative_zones.sort_by_key(|zone| -(zone.num_labels() as i16));
+            authoritative_zones
+                .into_iter()
+                .find(|zone| zone.zone_of(name))
         }
 
-        let res = get_rrset(&mut con, q.name(), q.query_type()).await;
-        if let Ok(db_response) = res {
+        let authoritative_zones = authoritative_zones
+            .into_iter()
+            .map(|zone| {
+                Name::from_utf8(zone).map_err(|_| anyhow!("Name in db is not a valid DNS name"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if let Some(auth_zone) = find_authoritative_zone(query.name(), &authoritative_zones) {
+            // TODO: also include the RRSIG record for the SOA record
+            // TODO: generate NSEC3 record and include it as well as its RRSIG record
+            let db_response = get_rrset(&mut con, &auth_zone, RecordType::SOA)
+                .await
+                .context("Could not get SOA record")?;
+
             let db_entry = match db_response {
-                QueryResponse::Empty => continue,
+                QueryResponse::Empty => bail!(PektinError::Bug(
+                    "No SOA record for a zone that we're supposedly authoritative for",
+                )),
                 QueryResponse::Definitive(def) => def,
                 QueryResponse::Wildcard(wild) => wild,
                 QueryResponse::Both { definitive, .. } => definitive,
             };
-            let records = match db_entry.convert() {
-                Ok(r) => r,
-                Err(err) => {
-                    eprintln!("{}", err);
-                    response.set_response_code(ResponseCode::ServFail);
-                    break;
-                }
+            let (ttl, rr_set) = match db_entry {
+                DbEntry {
+                    rr_set: RrSet::SOA { rr_set },
+                    ttl,
+                    ..
+                } => (ttl, rr_set),
+                _ => bail!(PektinError::Bug(
+                    "DB response for SOA query gave non-SOA DbEntry",
+                )),
             };
-            response.add_answers(records);
-            answer_stored = true;
-        } else {
-            eprintln!("{}", res.err().unwrap());
-            response.set_response_code(ResponseCode::ServFail);
-            break;
-        }
-
-        let do_flag = message.edns().map(|edns| edns.dnssec_ok()).unwrap_or(false);
-        if answer_stored && do_flag {
-            let mut dnssec_con = match db_pool_dnssec.get().await {
-                Ok(c) => c,
-                Err(_) => {
-                    response.set_response_code(ResponseCode::ServFail);
-                    eprintln!("ServFail: could not get db dnssec connection from pool");
-
-                    // copy queries
-                    response.add_queries(message.take_queries().into_iter());
-                    return response;
+            for record in rr_set {
+                // get the name of the authoritative zone, preserving the case of
+                // the queried name
+                let mut soa_name = query.name().clone();
+                while soa_name.num_labels() != auth_zone.num_labels() {
+                    soa_name = soa_name.base_name();
                 }
-            };
-
-            let res = get_rrsig(&mut dnssec_con, q.name(), q.query_type()).await;
-            if let Ok(db_response) = res {
-                let db_entry = match db_response {
-                    QueryResponse::Empty => continue,
-                    QueryResponse::Definitive(def) => def,
-                    QueryResponse::Wildcard(wild) => wild,
-                    QueryResponse::Both { definitive, .. } => definitive,
-                };
-                let records = match db_entry.convert() {
-                    Ok(r) => r,
-                    Err(err) => {
-                        eprintln!("{}", err);
-                        response.set_response_code(ResponseCode::ServFail);
-                        break;
-                    }
-                };
-                response.add_answers(records);
-            } else {
-                eprintln!("{}", res.err().unwrap());
-                response.set_response_code(ResponseCode::ServFail);
-                break;
-            }
-        }
-    }
-
-    if !answer_stored && (response.response_code() != ResponseCode::ServFail) {
-        if let Some(queried_name) = zone_name {
-            match get_authoritative_zones(&mut con).await {
-                Ok(authoritative_zones) => {
-                    fn find_authoritative_zone(
-                        name: &Name,
-                        authoritative_zones: &[Name],
-                    ) -> Option<Name> {
-                        let mut authoritative_zones = authoritative_zones.to_owned();
-                        // the - makes it sort the zones with the most labels first
-                        authoritative_zones.sort_by_key(|zone| -(zone.num_labels() as i16));
-                        authoritative_zones
-                            .into_iter()
-                            .find(|zone| zone.zone_of(name))
-                    }
-
-                    let authoritative_zones: Vec<_> = authoritative_zones
-                        .into_iter()
-                        .map(|zone| {
-                            Name::from_utf8(zone).expect("Name in db is not a valid DNS name")
-                        })
-                        .collect();
-                    if let Some(auth_zone) =
-                        find_authoritative_zone(queried_name, &authoritative_zones)
-                    {
-                        // TODO: also include the RRSIG record for the SOA record
-                        // TODO: generate NSEC3 record and include it as well as its RRSIG record
-                        let res = get_rrset(&mut con, &auth_zone, RecordType::SOA).await;
-                        match res {
-                            Ok(db_response) => {
-                                let db_entry = match db_response {
-                                    QueryResponse::Empty => {
-                                        response.set_response_code(ResponseCode::Refused);
-                                        None
-                                    }
-                                    QueryResponse::Definitive(def) => Some(def),
-                                    QueryResponse::Wildcard(wild) => Some(wild),
-                                    QueryResponse::Both { definitive, .. } => Some(definitive),
-                                };
-                                let (ttl, rr_set) = match db_entry {
-                                    Some(DbEntry {
-                                        rr_set: RrSet::SOA { rr_set },
-                                        ttl,
-                                        ..
-                                    }) => (ttl, rr_set),
-                                    _ => (0, vec![]),
-                                };
-                                for record in rr_set {
-                                    // get the name of the authoritative zone, preserving the case of the queried name
-                                    let mut soa_name = queried_name.clone();
-                                    while soa_name.num_labels() != auth_zone.num_labels() {
-                                        soa_name = soa_name.base_name();
-                                    }
-                                    let rr =
-                                        Record::from_rdata(soa_name, ttl, RData::SOA(record.value));
-                                    // the name is a bit misleading; this adds the record to the authority section
-                                    response.add_name_server(rr);
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("Could not get SOA record: {}", e);
-                                response.set_response_code(ResponseCode::ServFail);
-                            }
-                        }
-                    } else {
-                        response.set_response_code(ResponseCode::Refused);
-                    }
-                }
-                Err(e) => {
-                    eprintln!("Could not get authoritative zones: {}", e);
-                    response.set_response_code(ResponseCode::ServFail);
-                }
+                let rr = Record::from_rdata(soa_name, ttl, RData::SOA(record.value));
+                // the name is a bit misleading; this adds the record to the
+                // authority section
+                response.add_name_server(rr);
             }
         } else {
-            // TODO is that right?
+            // the query was for a zone we're not authoritative for
             response.set_response_code(ResponseCode::Refused);
         }
     }
 
-    // copy queries
-    response.add_queries(message.take_queries().into_iter());
+    Ok(())
+}
 
-    response
+/// Checks that the given query is valid.
+///
+/// Returns true, if it valid, else false. A response to an invalid query should have a response
+/// code of [`ResponseCode::FormErr`].
+///
+/// Currently, this only checks that it contains exactly one entry in the question section.
+fn validate_query_message(query: &Message) -> bool {
+    query.queries().len() == 1
+}
+
+/// Tries to find an answer to the given query with the provided function and, if found, adds it to
+/// the given response.
+///
+/// ## Return value
+/// - Ok(true) if an answer was found and stored in the given response
+/// - Ok(false) if no answer was found, but no errors occurred
+/// - Error(e) if an error occurred (e.g. database connection error or [`DbEntry`] could not be
+///   converted to [`Record`]).
+async fn try_find_and_add_answer<'c, 'n, O, F>(
+    response: &mut Message,
+    query: &'n Query,
+    get_fn: F,
+    con: &'c mut Connection,
+) -> PektinResult<bool>
+where
+    O: futures_util::Future<Output = PektinResult<QueryResponse>>,
+    F: Fn(&'c mut Connection, &'n Name, RecordType) -> O,
+{
+    let db_response = get_fn(con, query.name(), query.query_type()).await?;
+    let db_entry = match db_response {
+        QueryResponse::Empty => return Ok(false),
+        QueryResponse::Definitive(def) => def,
+        QueryResponse::Wildcard(wild) => wild,
+        QueryResponse::Both { definitive, .. } => definitive,
+    };
+    let records = db_entry.convert()?;
+    response.add_answers(records);
+    Ok(true)
 }

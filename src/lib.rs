@@ -46,7 +46,7 @@ pub async fn process_request(mut message: Message, db_pool: Pool, db_pool_dnssec
     response.set_authoritative(true);
 
     // only add EDNS to the response if it's present in the query message
-    if message.edns().is_some() {
+    if message.extensions().is_some() {
         let mut edns = Edns::new();
         // TODO: think about payload size (see https://www.rfc-editor.org/rfc/rfc6891#section-6.2.5)
         edns.set_max_payload(4096);
@@ -57,6 +57,10 @@ pub async fn process_request(mut message: Message, db_pool: Pool, db_pool_dnssec
     {
         error!("ServFail: {}", e);
         response.set_response_code(ResponseCode::ServFail);
+        // drop any entries that might have already been added to the response
+        response.answers_mut().clear();
+        response.name_servers_mut().clear();
+        response.additionals_mut().clear();
     }
 
     // echo back the query section in the response
@@ -98,12 +102,19 @@ async fn process_request_internal(
     // try to find a matching answer (wildcard allowed).
     // keep track if we added an answer into the message (response.answer_count() doesn't
     // automatically update)
-    let answer_stored = try_find_and_add_answer(response, query, get_rrset, &mut con).await?;
+    let answers = find_answers(query, get_rrset, &mut con).await?;
+    let answer_stored = !answers.is_empty();
+    response.add_answers(answers);
 
     // if we found a matching answer and the DO flag is set, try to get the matching RRSIG entries
-    let do_flag = message.edns().map(|edns| edns.dnssec_ok()).unwrap_or(false);
+    let do_flag = message
+        .extensions()
+        .as_ref()
+        .map(|edns| edns.dnssec_ok())
+        .unwrap_or(false);
     if answer_stored && do_flag {
-        try_find_and_add_answer(response, query, get_rrsig, &mut dnssec_con).await?;
+        let answers = find_answers(query, get_rrsig, &mut dnssec_con).await?;
+        response.add_answers(answers);
     }
 
     // we haven't found a matching answer, therefore try to find the SOA record for the query's zone
@@ -153,34 +164,24 @@ fn validate_query_message(query: &Message) -> bool {
     query.queries().len() == 1
 }
 
-/// Tries to find an answer to the given query with the provided function and, if found, adds it to
-/// the given response.
-///
-/// ## Return value
-/// - Ok(true) if an answer was found and stored in the given response
-/// - Ok(false) if no answer was found, but no errors occurred
-/// - Error(e) if an error occurred (e.g. database connection error or [`DbEntry`] could not be
-///   converted to [`Record`]).
-async fn try_find_and_add_answer<'c, 'n, O, F>(
-    response: &mut Message,
+/// Tries to find answers to the given query with the provided function.
+async fn find_answers<'c, 'n, O, F>(
     query: &'n Query,
     get_fn: F,
     con: &'c mut Connection,
-) -> PektinResult<bool>
+) -> PektinResult<Vec<Record>>
 where
     O: futures_util::Future<Output = PektinResult<QueryResponse>>,
     F: Fn(&'c mut Connection, &'n Name, RecordType) -> O,
 {
     let db_response = get_fn(con, query.name(), query.query_type()).await?;
     let db_entry = match db_response {
-        QueryResponse::Empty => return Ok(false),
+        QueryResponse::Empty => return Ok(vec![]),
         QueryResponse::Definitive(def) => def,
         QueryResponse::Wildcard(wild) => wild,
         QueryResponse::Both { definitive, .. } => definitive,
     };
-    let records = db_entry.convert()?;
-    response.add_answers(records);
-    Ok(true)
+    Ok(db_entry.convert()?)
 }
 
 /// Assumes the given query matched no known records. Adds the SOA record for the given zone to the
@@ -193,7 +194,6 @@ async fn add_soa_and_nsec3(
     con: &mut Connection,
     dnssec_con: &mut Connection,
 ) -> anyhow::Result<()> {
-    // TODO: also include the RRSIG record for the SOA record
     // TODO: generate NSEC3 record and include it as well as its RRSIG record
 
     let db_response = get_rrset(con, &authoritative_zone, RecordType::SOA)
@@ -219,21 +219,32 @@ async fn add_soa_and_nsec3(
         )),
     };
 
-    ensure!(
-        rr_set.len() == 1,
-        "Expected exactly one SOA record, got more or less"
-    );
+    ensure!(rr_set.len() == 1, "Expected exactly one SOA record");
 
-    // get the name of the authoritative zone, preserving the case of
-    // the queried name
+    // get the name of the authoritative zone, preserving the case of the queried name
     let mut soa_name = query.name().clone();
     while soa_name.num_labels() != authoritative_zone.num_labels() {
         soa_name = soa_name.base_name();
     }
-    let rr = Record::from_rdata(soa_name, ttl, RData::SOA(rr_set.pop().unwrap().value));
-    // the name is a bit misleading; this adds the record to the
-    // authority section
+    let rr = Record::from_rdata(
+        soa_name.clone(),
+        ttl,
+        RData::SOA(rr_set.pop().unwrap().value),
+    );
+    // the name is a bit misleading; this adds the record to the authority section
     response.add_name_server(rr);
+
+    if do_flag {
+        let rrsig = find_answers(
+            &Query::query(soa_name, RecordType::SOA),
+            get_rrsig,
+            dnssec_con,
+        )
+        .await?;
+
+        // the name is a bit misleading; this adds the records to the authority section
+        response.add_name_servers(rrsig);
+    }
 
     Ok(())
 }

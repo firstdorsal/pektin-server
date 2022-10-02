@@ -1,7 +1,7 @@
 pub mod doh;
 pub mod persistence;
 
-use anyhow::{anyhow, bail, Context};
+use anyhow::{anyhow, bail, ensure, Context};
 use futures_util::join;
 use log::{error, info};
 use pektin_common::deadpool_redis::redis::aio::Connection;
@@ -109,62 +109,31 @@ async fn process_request_internal(
     // we haven't found a matching answer, therefore try to find the SOA record for the query's zone
     // and respond with that instead
     if !answer_stored {
-        let authoritative_zones = get_authoritative_zones(&mut con)
+        let mut authoritative_zones = get_authoritative_zones(&mut con)
             .await
-            .context("Could not get authoritative zones")?;
-
-        fn find_authoritative_zone(name: &Name, authoritative_zones: &[Name]) -> Option<Name> {
-            let mut authoritative_zones = authoritative_zones.to_owned();
-            // the - makes it sort the zones with the most labels first
-            authoritative_zones.sort_by_key(|zone| -(zone.num_labels() as i16));
-            authoritative_zones
-                .into_iter()
-                .find(|zone| zone.zone_of(name))
-        }
-
-        let authoritative_zones = authoritative_zones
+            .context("Could not get authoritative zones")?
             .into_iter()
             .map(|zone| {
                 Name::from_utf8(zone).map_err(|_| anyhow!("Name in db is not a valid DNS name"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if let Some(auth_zone) = find_authoritative_zone(query.name(), &authoritative_zones) {
-            // TODO: also include the RRSIG record for the SOA record
-            // TODO: generate NSEC3 record and include it as well as its RRSIG record
-            let db_response = get_rrset(&mut con, &auth_zone, RecordType::SOA)
-                .await
-                .context("Could not get SOA record")?;
+        // the - makes it sort the zones with the most labels first
+        authoritative_zones.sort_by_key(|zone| -(zone.num_labels() as i16));
 
-            let db_entry = match db_response {
-                QueryResponse::Empty => bail!(PektinError::Bug(
-                    "No SOA record for a zone that we're supposedly authoritative for",
-                )),
-                QueryResponse::Definitive(def) => def,
-                QueryResponse::Wildcard(wild) => wild,
-                QueryResponse::Both { definitive, .. } => definitive,
-            };
-            let (ttl, rr_set) = match db_entry {
-                DbEntry {
-                    rr_set: RrSet::SOA { rr_set },
-                    ttl,
-                    ..
-                } => (ttl, rr_set),
-                _ => bail!(PektinError::Bug(
-                    "DB response for SOA query gave non-SOA DbEntry",
-                )),
-            };
-            for record in rr_set {
-                // get the name of the authoritative zone, preserving the case of
-                // the queried name
-                let mut soa_name = query.name().clone();
-                while soa_name.num_labels() != auth_zone.num_labels() {
-                    soa_name = soa_name.base_name();
-                }
-                let rr = Record::from_rdata(soa_name, ttl, RData::SOA(record.value));
-                // the name is a bit misleading; this adds the record to the
-                // authority section
-                response.add_name_server(rr);
-            }
+        let authoritative_zone = authoritative_zones
+            .into_iter()
+            .find(|zone| zone.zone_of(query.name()));
+
+        if let Some(auth_zone) = authoritative_zone {
+            add_soa_and_nsec3(
+                response,
+                query,
+                auth_zone,
+                do_flag,
+                &mut con,
+                &mut dnssec_con,
+            )
+            .await?;
         } else {
             // the query was for a zone we're not authoritative for
             response.set_response_code(ResponseCode::Refused);
@@ -212,4 +181,59 @@ where
     let records = db_entry.convert()?;
     response.add_answers(records);
     Ok(true)
+}
+
+/// Assumes the given query matched no known records. Adds the SOA record for the given zone to the
+/// response, and if `do_flag` is true, also appropriate NSEC3 and RRSIG records.
+async fn add_soa_and_nsec3(
+    response: &mut Message,
+    query: &Query,
+    authoritative_zone: Name,
+    do_flag: bool,
+    con: &mut Connection,
+    dnssec_con: &mut Connection,
+) -> anyhow::Result<()> {
+    // TODO: also include the RRSIG record for the SOA record
+    // TODO: generate NSEC3 record and include it as well as its RRSIG record
+
+    let db_response = get_rrset(con, &authoritative_zone, RecordType::SOA)
+        .await
+        .context("Could not get SOA record")?;
+
+    let db_entry = match db_response {
+        QueryResponse::Empty => bail!(PektinError::Bug(
+            "No SOA record for a zone that we're supposedly authoritative for",
+        )),
+        QueryResponse::Definitive(def) => def,
+        QueryResponse::Wildcard(wild) => wild,
+        QueryResponse::Both { definitive, .. } => definitive,
+    };
+    let (ttl, mut rr_set) = match db_entry {
+        DbEntry {
+            rr_set: RrSet::SOA { rr_set },
+            ttl,
+            ..
+        } => (ttl, rr_set),
+        _ => bail!(PektinError::Bug(
+            "DB response for SOA query gave non-SOA DbEntry",
+        )),
+    };
+
+    ensure!(
+        rr_set.len() == 1,
+        "Expected exactly one SOA record, got more or less"
+    );
+
+    // get the name of the authoritative zone, preserving the case of
+    // the queried name
+    let mut soa_name = query.name().clone();
+    while soa_name.num_labels() != authoritative_zone.num_labels() {
+        soa_name = soa_name.base_name();
+    }
+    let rr = Record::from_rdata(soa_name, ttl, RData::SOA(rr_set.pop().unwrap().value));
+    // the name is a bit misleading; this adds the record to the
+    // authority section
+    response.add_name_server(rr);
+
+    Ok(())
 }
